@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin — Amour Jewels</title>
+<meta name="robots" content="noindex, nofollow">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%231A1712'/%3E%3Ctext x='32' y='44' font-family='Fraunces,Georgia,serif' font-size='34' fill='%23FFFFFF' text-anchor='middle'%3EA%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..700;1,9..144,300..700&family=Karla:ital,wght@0,200..800;1,200..800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css?v=20261029">
+<link rel="stylesheet" href="css/admin.css?v=20260923">
+<link rel="stylesheet" href="css/theme-atelier.css?v=20260923">
+<script src="js/error-boundary.js?v=20261027"></script>
+</head>
+<body class="adm-body">
+
+<!-- ——— LOGIN (demo password + OTP 2FA) ——— -->
+<div class="adm-login" id="admLogin">
+  <div class="bento">
+    <div style="text-align:center;margin-bottom:24px">
+      <div class="f-logo">AMOUR</div>
+      <span style="font:500 9px/1 var(--sans);letter-spacing:.4em;text-transform:uppercase;color:var(--gold-deep)">Admin Console</span>
+    </div>
+    <div id="admStep1">
+      <div class="field"><label>Username</label><input id="admUser" autocomplete="username" placeholder="staff username" spellcheck="false"></div>
+      <div class="field"><label>Password</label>
+        <div class="adm-pass-wrap">
+          <input id="admPass" type="password" autocomplete="current-password" placeholder="········">
+          <button type="button" id="admPassEye" aria-label="Show password" title="Show password">
+            <svg viewBox="0 0 24 24"><path d="M2 12s3.6-6.2 10-6.2S22 12 22 12s-3.6 6.2-10 6.2S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+      </div>
+      <button class="btn wide" id="admLoginBtn" style="width:100%">Sign In</button>
+      <p class="adm-err" id="admErr"></p>
+      <p class="adm-note">Authorised staff only. Five failed attempts lock the console for 5 minutes, and every attempt is written to the access log.</p>
+    </div>
+    <div id="admStep2" hidden>
+      <div class="field adm-2fa"><label>Two-factor code — sent to the registered device</label><input id="admOtp" maxlength="6" inputmode="numeric" placeholder="· · · · · ·"></div>
+      <button class="btn wide dark" id="admOtpBtn" style="width:100%;background:var(--espresso);border-color:var(--espresso)">Verify &amp; Continue</button>
+      <p class="adm-note" id="admOtpInfo">Demo 2FA — any 6 digits work (e.g. <b>123456</b>). Production: TOTP authenticator app or SMS OTP.</p>
+      <p style="margin-top:12px"><button type="button" id="admBack" style="font:500 11px/1 var(--sans);letter-spacing:.12em;text-transform:uppercase;color:var(--taupe);text-decoration:underline;text-underline-offset:3px">← Back to sign-in</button></p>
+    </div>
+    <p class="adm-secure"><b>Demo build.</b> Sign-in, 2FA, lockout and the access log run entirely in your browser. Production uses server-side sessions, TOTP/SMS OTP, an IP allow-list and a WAF — see Security &amp; Access.</p>
+  </div>
+</div>
+
+<!-- ——— PANEL ——— -->
+<div class="adm-shell" id="admShell" hidden>
+  <aside class="adm-side">
+    <div class="brand">
+      <div class="f-logo">AMOUR</div>
+      <span>Admin Console</span>
+    </div>
+    <nav class="adm-nav" id="admNav">
+      <button data-sec="dash" class="active">Dashboard</button>
+      <button data-sec="orders">Orders</button>
+      <button data-sec="products">Products</button>
+      <button data-sec="categories">Categories</button>
+      <button data-sec="inventory">Inventory</button>
+      <button data-sec="customers">Customers</button>
+      <button data-sec="reviews">Reviews</button>
+      <button data-sec="returns">Returns &amp; RTO</button>
+      <button data-sec="coupons">Coupons</button>
+      <button data-sec="discounts">Discounts</button>
+      <button data-sec="marketing">Marketing</button>
+      <button data-sec="whatsapp">WhatsApp</button>
+      <button data-sec="abandoned">Abandoned Carts</button>
+      <button data-sec="messages">Messages</button>
+      <button data-sec="shipping">Shipping</button>
+      <button data-sec="gst">GST &amp; Invoicing</button>
+      <button data-sec="settings">Settings &amp; Backup</button>
+    </nav>
+    <div class="adm-foot">
+      <p>Amour Jewels Retail LLP<br>GSTIN 08AAGCA1234K1ZP</p>
+      <p id="admSession" style="margin-top:8px;opacity:.75">Session: —</p>
+      <button class="adm-btn" id="admLogout" style="margin-top:10px;width:100%">Sign out</button>
+    </div>
+  </aside>
+
+  <main class="adm-main">
+    <div class="adm-top">
+      <h1 id="admTitle">Dashboard</h1>
+      <div class="who"><span class="adm-ava" id="admAva">A</span><span id="admWho">Not signed in</span></div>
+    </div>
+
+    <section class="adm-sec active" data-sec="dash"></section>
+    <section class="adm-sec" data-sec="orders"></section>
+    <section class="adm-sec" data-sec="products"></section>
+    <section class="adm-sec" data-sec="categories"></section>
+    <section class="adm-sec" data-sec="inventory"></section>
+    <section class="adm-sec" data-sec="customers"></section>
+    <section class="adm-sec" data-sec="reviews"></section>
+    <section class="adm-sec" data-sec="returns"></section>
+    <section class="adm-sec" data-sec="coupons"></section>
+    <section class="adm-sec" data-sec="discounts"></section>
+    <section class="adm-sec" data-sec="marketing"></section>
+    <section class="adm-sec" data-sec="whatsapp"></section>
+    <section class="adm-sec" data-sec="abandoned"></section>
+    <section class="adm-sec" data-sec="messages"></section>
+    <section class="adm-sec" data-sec="shipping"></section>
+    <section class="adm-sec" data-sec="gst"></section>
+    <section class="adm-sec" data-sec="settings"></section>
+  </main>
+</div>
+
+<script src="js/products.js?v=20260923" defer></script>
+<script src="js/store-config.js?v=20260923" defer></script>
+<script src="js/analytics.js?v=20261008" defer></script>
+<script src="js/currency.js?v=20261013" defer></script>
+<script src="js/main.js?v=20261017" defer></script>
+<script src="js/shop-dropdown.js?v=20261007" defer></script>
+<script src="js/admin.js?v=20260927" defer></script>
+</body>
+</html>
