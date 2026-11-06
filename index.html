@@ -22,8 +22,10 @@
       <div class="f-logo">AMOUR</div>
       <span style="font:500 9px/1 var(--sans);letter-spacing:.4em;text-transform:uppercase;color:var(--gold-deep)">Admin Console</span>
     </div>
+    
+    <!-- STEP 1: Email & Password -->
     <div id="admStep1">
-      <div class="field"><label>E-mail</label><input id="admUser" type="email" autocomplete="username" placeholder="you@amourjewels.in" spellcheck="false"></div>
+      <div class="field"><label>E-mail</label><input id="admUser" type="email" autocomplete="username" placeholder="you@amourjewels.com" spellcheck="false"></div>
       <div class="field"><label>Password</label>
         <div class="adm-pass-wrap">
           <input id="admPass" type="password" autocomplete="current-password" placeholder="········">
@@ -34,8 +36,20 @@
       </div>
       <button class="btn wide" id="admLoginBtn" style="width:100%">Sign In</button>
       <p class="adm-err" id="admErr"></p>
-      <p class="adm-note">Authorised staff only. Repeated wrong passwords lock the account for a while.</p>
+      <p class="adm-note">Authorised staff only. Repeated wrong passwords lock the account for 15 minutes.</p>
     </div>
+
+    <!-- STEP 2: 2FA OTP -->
+    <div id="admStep2" hidden>
+      <p class="adm-note" style="text-align:center;margin-bottom:16px">Enter the 6-digit code sent to your email.</p>
+      <div class="field adm-2fa">
+        <input id="admOtp" type="text" maxlength="6" inputmode="numeric" placeholder="------" autocomplete="one-time-code">
+      </div>
+      <button class="btn wide" id="admVerifyBtn" style="width:100%">Verify Code</button>
+      <p class="adm-err" id="admOtpErr"></p>
+      <button class="au-back" id="admBackToLogin" style="margin-top:16px">← Back to Login</button>
+    </div>
+    
     <p class="adm-secure"><b>Secure sign-in.</b> Your session ends automatically after 2 hours and when you close this tab.</p>
   </div>
 </div>
@@ -61,6 +75,8 @@
       <button data-sec="shipping">Shipping</button>
       <button data-sec="gst">GST &amp; Invoicing</button>
       <button data-sec="emails">Email Queue</button>
+      <!-- ONLY SHOWS FOR SUPER ADMINS -->
+      <button data-sec="team" id="navTeamBtn" style="display:none; border-top: 1px solid rgba(255,255,255,.1); margin-top: 12px; padding-top: 16px;">Team Management</button>
     </nav>
     <div class="adm-foot">
       <p>Amour Jewels<br>Admin Console</p>
@@ -75,6 +91,7 @@
       <div class="who"><span class="adm-ava" id="admAva">A</span><span id="admWho">Not signed in</span></div>
     </div>
 
+    <!-- Sections -->
     <section class="adm-sec active" data-sec="dash"></section>
     <section class="adm-sec" data-sec="orders"></section>
     <section class="adm-sec" data-sec="products"></section>
@@ -88,6 +105,7 @@
     <section class="adm-sec" data-sec="shipping"></section>
     <section class="adm-sec" data-sec="gst"></section>
     <section class="adm-sec" data-sec="emails"></section>
+    <section class="adm-sec" data-sec="team"></section> <!-- NEW TEAM SECTION -->
   </main>
 </div>
 

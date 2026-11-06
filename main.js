@@ -226,7 +226,7 @@ function dayLabelsFrom(n) {
   const out = [];
   for (let i = n - 1; i >= 0; i--) {
     const d = new Date(Date.now() - i * 864e5);
-    out.push({ key: d.toLocaleDateString('en-CA'), label: d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }).replace(' ', ' ') });
+    out.push({ key: d.toLocaleDateString('en-CA'), label: d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }).replace(' ', ' ') });
   }
   return out;
 }
@@ -1076,17 +1076,69 @@ async function renderEmails(el) {
 }
 
 /* ============================================================
+   TEAM MANAGEMENT (Super Admin Only)
+   ============================================================ */
+async function renderTeam(el) {
+  loading(el);
+  let users;
+  try { users = await api('/api/admin/auth/users'); } 
+  catch (e) { failBox(el, e, () => renderTeam(el)); return; }
+  
+  el.innerHTML = `
+  <div class="adm-toolbar">
+    <span class="pill">${users.length} Admin Users</span>
+    <button class="adm-btn dark" id="teamAddBtn">+ Add New Admin</button>
+  </div>
+  ${tbl(['Name', 'Email', 'Role', 'Status', 'Actions'], users.map((u, i) => `<tr>
+    <td><b>${esc(u.name)}</b></td>
+    <td>${esc(u.email)}</td>
+    <td>${(u.roles || []).includes('ROLE_SUPER_ADMIN') ? chip('Super Admin', 'info') : chip('Admin', 'ok')}</td>
+    <td>${u.active ? chip('Active', 'ok') : chip('Suspended', 'bad')}</td>
+    <td>
+      <button class="adm-btn" data-team-tog="${u.id}" data-act="${u.active}">${u.active ? 'Suspend' : 'Activate'}</button>
+    </td>
+  </tr>`))}`;
+
+  // Toggle Status
+  el.querySelectorAll('[data-team-tog]').forEach(b => b.addEventListener('click', async () => {
+    const isActive = b.dataset.act === 'true';
+    if (!confirmBox(`Are you sure you want to ${isActive ? 'suspend' : 'activate'} this admin?`)) return;
+    await act(b, () => api(`/api/admin/auth/users/${b.dataset.teamTog}/status?active=${!isActive}`, { method: 'PATCH' }), 'Admin status updated');
+    renderTeam(el);
+  }));
+
+  // Add User Modal
+  el.querySelector('#teamAddBtn').addEventListener('click', () => {
+    openModal('Create New Admin', `
+      <div class="f-grid">
+        ${fld('tuName', 'Full Name', '', 'text', true)}
+        ${fld('tuEmail', 'Email Address', '', 'email', true)}
+        ${fld('tuPass', 'Temporary Password', '', 'password', true)}
+      </div>
+      <p class="adm-note">They will be granted standard Admin access.</p>
+    `, 'Create Admin', async bg => {
+      const name = gv(bg, 'tuName'), email = gv(bg, 'tuEmail'), password = gv(bg, 'tuPass');
+      if (!name || !email || !password) throw new Error('All fields are required.');
+      await api('/api/admin/auth/users/create', { method: 'POST', body: { name, email, password } });
+      toast('Admin created successfully.');
+      renderTeam(el);
+      return true;
+    });
+  });
+}
+
+/* ============================================================
    SECTION ROUTER
    ============================================================ */
 const SEC_TITLES = {
   dash: 'Dashboard', orders: 'Orders', products: 'Products', categories: 'Categories', inventory: 'Inventory',
   customers: 'Customers', reviews: 'Reviews', returns: 'Returns & Refunds', coupons: 'Coupons',
-  messages: 'Customer Messages', shipping: 'Shipping', gst: 'GST & Invoicing', emails: 'Email Queue'
+  messages: 'Customer Messages', shipping: 'Shipping', gst: 'GST & Invoicing', emails: 'Email Queue', team: 'Team Management'
 };
 const RENDERERS = {
   dash: renderDash, orders: renderOrders, products: renderProducts, categories: renderCategories, inventory: renderInventory,
   customers: renderCustomers, reviews: renderReviews, returns: renderReturns, coupons: renderCoupons,
-  messages: renderMessages, shipping: renderShipping, gst: renderGST, emails: renderEmails
+  messages: renderMessages, shipping: renderShipping, gst: renderGST, emails: renderEmails, team: renderTeam
 };
 function renderSection(key) {
   const sec = document.querySelector('.adm-sec[data-sec="' + key + '"]');
@@ -1099,18 +1151,18 @@ function renderSection(key) {
 }
 
 /* ============================================================
-   SIGN-IN  (real backend login: e-mail + password, 5 wrong tries lock the account)
+   SIGN-IN & 2FA
    ============================================================ */
-let expiryTimer = null;
-function tokenExpiry(token) {
-  try { return JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).exp * 1000; } catch (e) { return 0; }
-}
+let loginBound = false;
+let currentChallengeId = null;
+
 function showLoginError(msg) {
   const err = document.getElementById('admErr');
   err.textContent = msg || '';
   err.style.display = msg ? 'block' : 'none';
   err.classList.toggle('show', !!msg);
 }
+
 function signOut(message) {
   clearTimeout(expiryTimer);
   session.clear();
@@ -1121,45 +1173,108 @@ function signOut(message) {
   document.querySelectorAll('.adm-sec').forEach(s => { s.innerHTML = ''; s.removeAttribute('data-ready'); delete s.dataset.q; delete s.dataset.f; delete s.dataset.page; });
   showLoginError(message || '');
 }
-let loginBound = false;
+
 function initLogin() {
   if (loginBound) return;
   loginBound = true;
-  const user = document.getElementById('admUser'), pass = document.getElementById('admPass'), btn = document.getElementById('admLoginBtn');
-  document.getElementById('admPassEye').addEventListener('click', () => { pass.type = pass.type === 'password' ? 'text' : 'password'; });
-  const submit = async () => {
+  
+  const user = document.getElementById('admUser'), 
+        pass = document.getElementById('admPass'), 
+        btn = document.getElementById('admLoginBtn');
+  const otpInput = document.getElementById('admOtp'), 
+        verifyBtn = document.getElementById('admVerifyBtn');
+
+  document.getElementById('admPassEye').addEventListener('click', () => { 
+    pass.type = pass.type === 'password' ? 'text' : 'password'; 
+  });
+
+  const submitLogin = async () => {
     const email = (user.value || '').trim(), password = pass.value;
     if (!email || !password) { showLoginError('Enter your e-mail and password.'); return; }
+    
     btn.disabled = true; btn.textContent = 'Signing in…'; showLoginError('');
     try {
       const r = await api('/api/admin/auth/login', { method: 'POST', body: { email, password }, noAuthRedirect: true });
-      if (!r || !r.token) throw new ApiError('Sign-in failed. Please try again.', 0);
-      session.save(r.token, { email: r.email, name: r.name, roles: r.roles || [] });
-      openPanel();
+      
+      if (r.twoFactorRequired) {
+        currentChallengeId = r.challengeId;
+        document.getElementById('admStep1').hidden = true;
+        document.getElementById('admStep2').hidden = false;
+        otpInput.focus();
+      }
     } catch (e) {
-      showLoginError(e.status === 401 || e.status === 400 ? 'Wrong e-mail or password.' : e.message);
+      showLoginError(e.status === 429 ? 'Account locked. Try again in 15 mins.' : 'Wrong e-mail or password.');
     } finally { btn.disabled = false; btn.textContent = 'Sign In'; }
   };
-  btn.addEventListener('click', submit);
-  [user, pass].forEach(i => i.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); }));
+
+  const submitOtp = async () => {
+    const otp = otpInput.value.trim();
+    if (otp.length !== 6) { document.getElementById('admOtpErr').textContent = 'Enter the 6-digit code.'; return; }
+    
+    verifyBtn.disabled = true; verifyBtn.textContent = 'Verifying…';
+    document.getElementById('admOtpErr').textContent = '';
+    try {
+      const r = await api('/api/admin/auth/verify-2fa', { method: 'POST', body: { challengeId: currentChallengeId, otp }, noAuthRedirect: true });
+      if (!r || !r.token) throw new ApiError('Sign-in failed.', 0);
+      
+      session.save(r.token, {}); 
+      const me = await api('/api/admin/auth/me');
+      session.save(r.token, me);
+      
+      document.getElementById('admStep2').hidden = true;
+      openPanel();
+    } catch (e) {
+      document.getElementById('admOtpErr').textContent = 'Invalid or expired code.';
+    } finally { verifyBtn.disabled = false; verifyBtn.textContent = 'Verify Code'; }
+  };
+
+  document.getElementById('admBackToLogin').addEventListener('click', () => {
+    document.getElementById('admStep2').hidden = true;
+    document.getElementById('admStep1').hidden = false;
+    currentChallengeId = null;
+    otpInput.value = '';
+  });
+
+  btn.addEventListener('click', submitLogin);
+  verifyBtn.addEventListener('click', submitOtp);
+  [user, pass].forEach(i => i.addEventListener('keydown', e => { if (e.key === 'Enter') submitLogin(); }));
+  otpInput.addEventListener('keydown', e => { if (e.key === 'Enter') submitOtp(); });
 }
+
 let panelBound = false;
+let expiryTimer = null;
+
+function tokenExpiry(token) {
+  try { return JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).exp * 1000; } catch (e) { return 0; }
+}
+
 function openPanel() {
   const p = session.profile;
   document.getElementById('admLogin').hidden = true;
   document.getElementById('admShell').hidden = false;
+  
   const roles = (p.roles || []).join(' ');
-  document.getElementById('admWho').textContent = (p.name || p.email || 'Admin') + (roles.indexOf('SUPER_ADMIN') > -1 ? ' · Super admin' : ' · Admin');
+  const isSuperAdmin = roles.indexOf('SUPER_ADMIN') > -1;
+  
+  document.getElementById('admWho').textContent = (p.name || p.email || 'Admin') + (isSuperAdmin ? ' · Super admin' : ' · Admin');
   document.getElementById('admAva').textContent = ((p.name || p.email || 'A')[0] || 'A').toUpperCase();
   document.getElementById('admSession').textContent = 'Signed in ' + new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+  
+  document.getElementById('navTeamBtn').style.display = isSuperAdmin ? 'block' : 'none';
+
   if (!panelBound) {
     panelBound = true;
     document.querySelectorAll('#admNav button').forEach(b => b.addEventListener('click', () => renderSection(b.dataset.sec)));
-    document.getElementById('admLogout').addEventListener('click', () => signOut(''));
+    document.getElementById('admLogout').addEventListener('click', async () => {
+      try { await api('/api/admin/auth/logout', { method: 'POST' }); } catch(e){} 
+      signOut('Logged out securely.');
+    });
   }
+  
   const exp = tokenExpiry(session.token);
   clearTimeout(expiryTimer);
   if (exp) expiryTimer = setTimeout(() => signOut('Your session has ended — please sign in again.'), Math.max(1000, exp - Date.now()));
+  
   renderSection('dash');
 }
 
