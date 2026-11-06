@@ -8,6 +8,6 @@
 window.AMOUR_ADMIN = {
   apiBase: (location.hostname === 'localhost' || location.hostname === '127.0.0.1' || location.protocol === 'file:')
     ? 'http://localhost:10000'
-    : 'https://api.amourjewels.in/',
+    : 'https://api.amourjewels.in',
   storeName: 'Amour Jewels'
 };
