@@ -1,1945 +1,1093 @@
 /* ============================================================
-   AMOUR JEWELS — Admin console
-   Every screen is driven by data: js/products.js (catalogue),
-   js/store-config.js (settings, orders, tax, coupons) and
-   localStorage (overrides, reviews, content, audit trail).
-   Going live = swap these readers for API calls.
+   AMOUR JEWELS — Admin console (live build)
+   Every screen reads and writes the real backend through api().
+   Nothing is stored in the browser except the sign-in token
+   (sessionStorage, cleared when the tab closes).
    ============================================================ */
 
-/* ---------- staff access ---------- */
-const AUTH = { user: 'amour', pass: 'amour12423', maxFails: 5, lockMins: 5 };
-const ADM_KEY   = 'amour_admin_session_v1';
-const FAILS_KEY = 'amour_admin_fails_v1';
-const AUDIT_KEY = 'amour_admin_audit_v1';
-const CONTENT_KEY = 'amour_content_v1';   /* categories · reviews · discounts · messages · carts */
+const CFG = window.AMOUR_ADMIN || { apiBase: 'http://localhost:10000' };
+const TOKEN_KEY = 'amour_admin_token_v2';
+const PROFILE_KEY = 'amour_admin_profile_v2';
 
-/* ---------- seeds: catalogue taxonomy ---------- */
-const DEMO_CATEGORIES = [
-  { id: 'hand',      name: 'Hand Accessories',   parent: '—', order: 1, status: 'Live',  h1: 'Hand Accessories',   meta: 'Rings, bracelets and hathphools — everything the hands wear.' },
-  { id: 'necklaces', name: 'Necklaces | Chokers', parent: '—', order: 2, status: 'Live',  h1: 'Necklaces | Chokers', meta: 'Chokers, layered chains and pendant necklaces handcrafted in India.' },
-  { id: 'earrings',  name: 'Earrings',           parent: '—', order: 3, status: 'Live',  h1: 'Earrings',   meta: 'Statement chandbali, everyday studs and jhumkas in gold vermeil.' },
-  { id: 'bracelets', name: 'Bangles | Kadas',    parent: '—', order: 4, status: 'Live',  h1: 'Bangles | Kadas', meta: 'Wide kadas, bangles and tennis bracelets, hand-finished.' },
-  { id: 'hair',      name: 'Hair Accessories',   parent: '—', order: 5, status: 'Live',  h1: 'Hair Accessories', meta: 'Pins, jhoomars and matha-patti accents in heirloom finish.' },
-  { id: 'groom',     name: "Groom's Jewellery",  parent: '—', order: 6, status: 'Live',  h1: "Groom's Jewellery", meta: 'Buttons, brooches, kalangis and chains for him.' },
-  { id: 'brooches',  name: 'Brooches & Kalangi', parent: '—', order: 7, status: 'Live',  h1: 'Brooches & Kalangi', meta: 'Brooches and kalangis for sherwanis, safas and pleats.' },
-  { id: 'rings',     name: 'Rings',              parent: '—', order: 8, status: 'Live',  h1: 'Rings',      meta: 'Solitaire-look, halo and stacking rings in 92.5 silver.' },
-  { id: 'pearls',    name: 'Pearls',             parent: '—', order: 9, status: 'Live',  h1: 'Pearl Jewellery', meta: 'Baroque pearl strands and pendants with old-world lustre.' },
-  { id: 'everyday',  name: 'Everyday Gold',      parent: '—', order: 10, status: 'Live', h1: 'Everyday Gold', meta: 'Featherlight 18k vermeil pieces made for daily wear.' },
-  { id: 'bridal',    name: 'The Bridal Edit',    parent: '—', order: 11, status: 'Live', h1: 'The Bridal Edit', meta: 'Complete bridal sets in antique gold and polki finish.' },
-  { id: 'diamond',   name: 'Diamond Jewellery',  parent: '—', order: 13, status: 'Live', h1: 'Diamond Jewellery', meta: 'Diamond jewellery — solitaires, studs and statement pieces for life\'s brightest moments.' },
-  { id: 'gifting',   name: 'Gifting',            parent: '—', order: 12, status: 'Draft', h1: 'Gifting',    meta: 'Gift-ready pieces with keepsake packaging and a message card.' }
-];
+/* ---------- session ---------- */
+const session = {
+  get token() { try { return sessionStorage.getItem(TOKEN_KEY); } catch (e) { return null; } },
+  get profile() { try { return JSON.parse(sessionStorage.getItem(PROFILE_KEY)) || {}; } catch (e) { return {}; } },
+  save(token, profile) {
+    try { sessionStorage.setItem(TOKEN_KEY, token); sessionStorage.setItem(PROFILE_KEY, JSON.stringify(profile)); } catch (e) {}
+  },
+  clear() {
+    try { sessionStorage.removeItem(TOKEN_KEY); sessionStorage.removeItem(PROFILE_KEY); } catch (e) {}
+  }
+};
 
-/* ---------- seeds: discounts (rule engine) ---------- */
-const DEMO_DISCOUNTS = [
-  { id: 'd1', name: 'First-order welcome', type: 'Percent off', value: '10%',        scope: 'Entire order',      rule: 'First order · new customers',       stack: false, status: 'Active' },
-  { id: 'd2', name: 'Festive tiered',      type: 'Tiered',      value: '15% / 20%',  scope: 'Entire order',      rule: 'Above ₹5,000 / above ₹12,000', stack: false, status: 'Active' },
-  { id: 'd3', name: 'Bridal bundle',       type: 'Flat off',    value: '₹1,500',     scope: 'Bridal Edit',       rule: '2+ bridal SKUs in cart',            stack: true,  status: 'Active' },
-  { id: 'd4', name: 'Studs — buy 2 get 1', type: 'BOGO',        value: '3rd free',   scope: 'Earrings · studs',  rule: 'Buy 2 get 1 on lowest value',       stack: false, status: 'Paused' },
-  { id: 'd5', name: 'Referral — friend',   type: 'Percent off', value: '10%',        scope: 'Entire order',      rule: 'Referral link · first order only',   stack: false, status: 'Active' },
-  { id: 'd6', name: 'Cart-value booster',  type: 'Flat off',    value: '₹500',       scope: 'Entire order',      rule: 'Above ₹10,000 · prepaid only',      stack: true,  status: 'Active' }
-];
+/* ---------- API ---------- */
+class ApiError extends Error {
+  constructor(message, status) { super(message); this.status = status; }
+}
 
-/* ---------- seeds: reviews ---------- */
-const DEMO_REVIEWS = [
-  { product: 'Rajwada Antique Choker Set', name: 'Priya M.',  rating: 5, date: '2026-08-28', text: 'Exactly like the picture. Wore it for my sister\u2019s wedding — compliments all night.', status: 'Approved', verified: true,  helpful: 14 },
-  { product: 'Ira Baroque Pearl Pendant',  name: 'Tanya R.',  rating: 4, date: '2026-09-02', text: 'Pretty piece, slightly smaller than expected but lovely lustre.', status: 'Pending', verified: true,  helpful: 3 },
-  { product: 'Chandra Layered Necklace',   name: 'Nikita S.', rating: 5, date: '2026-09-05', text: 'Third purchase. Quality is consistently good and shipping is fast.', status: 'Pending', verified: true,  helpful: 7 },
-  { product: 'Moti Classic Pearl Strand',  name: 'Aditi B.',  rating: 5, date: '2026-08-19', text: 'Classic and weightless. I wear it with everything.', status: 'Approved', verified: true,  helpful: 21 },
-  { product: 'Meera Halo Ring',            name: 'Sneha K.',  rating: 3, date: '2026-08-30', text: 'Pretty but the plating dulled after a month of daily wear.', status: 'Pending', verified: false, helpful: 2 },
-  { product: 'Rajwada Antique Choker Set', name: 'Farah Q.',  rating: 5, date: '2026-09-08', text: 'The keepsake box makes it feel like a proper heirloom. Packaging is gorgeous.', status: 'Approved', verified: true,  helpful: 9 },
-  { product: 'Kada — Antique Wide',        name: 'Ritu J.',   rating: 4, date: '2026-09-01', text: 'Good weight, sizing ran a bit large — exchanged without hassle.', status: 'Approved', verified: true,  helpful: 5 },
-  { product: 'Kada — Antique Wide',        name: 'Anonymous', rating: 1, date: '2026-09-09', text: 'DM me for replica deals, cheapest rates', status: 'Hidden', verified: false, helpful: 0 }
-];
+/* api('/api/admin/orders?page=0')            → GET
+   api('/api/admin/products/save', {method:'POST', body:{...}})
+   api('/api/admin/products/upload-image', {method:'POST', form: FormData}) */
+async function api(path, opts) {
+  opts = opts || {};
+  const headers = {};
+  if (session.token) headers.Authorization = 'Bearer ' + session.token;
+  let body;
+  if (opts.form) { body = opts.form; }
+  else if (opts.body !== undefined) { headers['Content-Type'] = 'application/json'; body = JSON.stringify(opts.body); }
+  let res;
+  try {
+    res = await fetch(CFG.apiBase + path, { method: opts.method || 'GET', headers, body });
+  } catch (e) {
+    throw new ApiError('Cannot reach the server. Check your internet, or that the backend is running.', 0);
+  }
+  if (res.status === 401 && !opts.noAuthRedirect) {
+    signOut('Your session has ended — please sign in again.');
+    throw new ApiError('Session ended', 401);
+  }
+  if (opts.blob && res.ok) return res.blob();
+  let data = null;
+  const text = await res.text();
+  try { data = text ? JSON.parse(text) : null; } catch (e) { data = text; }
+  if (!res.ok) {
+    const msg = (data && (data.error || data.message)) || (typeof data === 'string' && data) || ('Request failed (' + res.status + ')');
+    throw new ApiError(msg, res.status);
+  }
+  return data;
+}
+const pageItems = d => Array.isArray(d) ? d : ((d && (d.content || d.items)) || []);
 
-/* ---------- seeds: roles, notification matrix, comms ---------- */
-const DEMO_ROLES = [
-  { role: 'Owner',      user: 'amour',                 scope: 'Full access — catalogue, orders, costs, settings, staff', twofa: true },
-  { role: 'Operations', user: 'ops@amourjewels.in',    scope: 'Orders, inventory, shipping, returns — no GST or settings', twofa: true },
-  { role: 'Accountant', user: 'ca@firm.in',            scope: 'GST, invoices, credit notes — read-only catalogue', twofa: false },
-  { role: 'Marketing',  user: 'growth@amourjewels.in', scope: 'Coupons, discounts, WhatsApp journeys, campaigns — no customer data', twofa: true }
-];
-
-const DEMO_NOTIFICATIONS = [
-  { stage: 'Order placed',     ch: 'WhatsApp + Email', tpl: 'order_confirmed',   when: 'Instant',             on: true },
-  { stage: 'Payment received', ch: 'WhatsApp + Email', tpl: 'payment_confirmed', when: 'Instant on capture',  on: true },
-  { stage: 'Order packed',     ch: 'WhatsApp',         tpl: 'packed_atelier',    when: 'On packing',          on: true },
-  { stage: 'Shipped + AWB',    ch: 'WhatsApp + SMS',   tpl: 'shipment_tracking', when: 'On dispatch',         on: true },
-  { stage: 'Out for delivery', ch: 'WhatsApp + SMS',   tpl: 'out_for_delivery',  when: 'Morning of delivery', on: true },
-  { stage: 'Delivered',        ch: 'WhatsApp + Email', tpl: 'delivered_care',    when: 'On delivery',         on: true },
-  { stage: 'Review request',   ch: 'WhatsApp + Email', tpl: 'review_request',    when: 'D+3 after delivery',  on: true },
-  { stage: 'Return approved',  ch: 'Email',            tpl: 'return_approved',   when: 'On approval',         on: true },
-  { stage: 'Refund processed', ch: 'Email + SMS',      tpl: 'refund_processed',  when: 'Within 24 hrs',       on: true },
-  { stage: 'Back in stock',    ch: 'WhatsApp + Email', tpl: 'back_in_stock',     when: 'On restock',          on: false }
-];
-
-const DEMO_MESSAGES = [
-  { name: 'Ananya S.', channel: 'WhatsApp',  text: 'Can this choker be delivered before the 20th?', ago: '10 min ago', state: 'Open' },
-  { name: 'Rhea K.',   channel: 'Email',     text: 'Do you ship gift cards internationally?',        ago: '2 hrs ago',  state: 'Open' },
-  { name: 'Kavya N.',  channel: 'WhatsApp',  text: 'Size help needed for the halo ring 🙏',           ago: '1 day ago',  state: 'Replied' },
-  { name: 'Ishita B.', channel: 'Instagram', text: 'Is the pearl strand real or shell pearl?',        ago: '1 day ago',  state: 'Open' },
-  { name: 'Meher D.',  channel: 'Email',     text: 'Invoice needed with my company GSTIN please.',    ago: '2 days ago', state: 'Closed' },
-  { name: 'Sana I.',   channel: 'WhatsApp',  text: 'Exchange request raised for the kada, size M.',   ago: '2 days ago', state: 'Replied' },
-  { name: 'Diya P.',   channel: 'Email',     text: 'Do you offer private bridal appointments?',     ago: '3 days ago', state: 'Open' },
-  { name: 'Naina R.',  channel: 'WhatsApp',  text: 'Loved the packaging! Do you sell the pouches?',   ago: '4 days ago', state: 'Closed' }
-];
-
-const DEMO_ABANDONED = [
-  { name: 'Kritika V.', email: 'kritika@example.in', phone: '98•••21', value: 12450, items: 'Rajwada choker + studs',   ago: '4 hrs ago',  attempts: 0, opted: true },
-  { name: 'Pooja N.',   email: 'pooja@example.in',   phone: '97•••08', value: 4850,  items: 'Chandra layered necklace', ago: '1 day ago',  attempts: 1, opted: true },
-  { name: 'Ishita B.',  email: 'ishita@example.in',  phone: '—',       value: 8900,  items: 'Ira baroque pearl pendant', ago: '2 days ago', attempts: 0, opted: false },
-  { name: 'Tara M.',    email: 'tara@example.in',    phone: '99•••47', value: 21000, items: 'Bridal set + kada pair',   ago: '3 days ago', attempts: 2, opted: true },
-  { name: 'Nisha G.',   email: 'nisha@example.in',   phone: '90•••15', value: 3200,  items: 'Everyday gold hoops',      ago: '5 days ago', attempts: 1, opted: true }
-];
-
-const DEMO_CUSTOMERS = [
-  { name: 'Ananya Sharma', email: 'ananya@example.in', phone: '98•••1123', city: 'Delhi',     state: 'Delhi',   orders: 4, spent: 38900, first: '2025-11-02', last: '2026-08-21', channel: 'Instagram', wa: true },
-  { name: 'Rhea Kapoor',   email: 'rhea@example.in',   phone: '97•••8842', city: 'Mumbai',    state: 'Maharashtra', orders: 3, spent: 22400, first: '2025-12-18', last: '2026-09-02', channel: 'Google',    wa: true },
-  { name: 'Meher Deol',    email: 'meher@example.in',  phone: '96•••3310', city: 'Ludhiana',  state: 'Punjab',      orders: 2, spent: 17850, first: '2026-01-08', last: '2026-07-14', channel: 'WhatsApp',  wa: true },
-  { name: 'Sana Iyer',     email: 'sana@example.in',   phone: '95•••7702', city: 'Bengaluru', state: 'Karnataka',   orders: 1, spent: 4850,  first: '2026-02-14', last: '2026-02-14', channel: 'Direct',    wa: false },
-  { name: 'Diya Patel',    email: 'diya@example.in',   phone: '94•••2278', city: 'Ahmedabad', state: 'Gujarat',     orders: 1, spent: 3200,  first: '2026-03-01', last: '2026-03-01', channel: 'Instagram', wa: true },
-  { name: 'Farah Qureshi', email: 'farah@example.in',  phone: '93•••9014', city: 'Hyderabad', state: 'Telangana',   orders: 2, spent: 19200, first: '2026-04-11', last: '2026-09-08', channel: 'Referral',  wa: true }
-];
-
-/* ---------- shared helpers ---------- */
+/* ---------- small helpers ---------- */
 const chip = (txt, cls) => `<span class="chip ${cls || ''}">${txt}</span>`;
+const money = n => '₹' + (Number(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 const moneyK = n => '₹' + (n >= 1e5 ? (n / 1e5).toFixed(1) + 'L' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : Math.round(n));
 const stars = r => `<span class="adm-stars">${'★'.repeat(Math.round(r))}${'☆'.repeat(5 - Math.round(r))}</span>`;
 const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-const dshort = d => (d && d !== '—') ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
+const dshort = d => d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
+const dtime = d => d ? new Date(d).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
 const pct = (a, b) => b ? Math.round(a / b * 100) : 0;
-const yn = b => b ? chip('Yes', 'ok') : chip('No', 'warn');
-
+const num = v => (v == null || v === '' || isNaN(+v)) ? 0 : +v;
+const kpi = (label, value, note, neg) =>
+  `<div class="kpi"><span>${label}</span><b>${value}</b>${note ? `<em class="${neg ? 'neg' : ''}">${note}</em>` : ''}</div>`;
 function tbl(head, rows) {
   return `<table class="adm-table"><thead><tr>${head.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`;
 }
 function tr(cols) { return `<tr>${cols.map(c => `<td>${c}</td>`).join('')}</tr>`; }
-const fld = (id, label, val, type, full) =>
-  `<div class="field${full ? ' full' : ''}"><label>${label}</label><input id="${id}" type="${type || 'text'}" value="${esc(val)}"></div>`;
+const fld = (id, label, val, type, full, extra) =>
+  `<div class="field${full ? ' full' : ''}"><label>${label}</label><input id="${id}" type="${type || 'text'}" value="${esc(val)}" ${extra || ''}></div>`;
+const sel = (id, label, options, current, full) =>
+  `<div class="field${full ? ' full' : ''}"><label>${label}</label><select id="${id}">${options.map(o => {
+    const v = Array.isArray(o) ? o[0] : o, t = Array.isArray(o) ? o[1] : o;
+    return `<option value="${esc(v)}" ${String(v) === String(current) ? 'selected' : ''}>${esc(t)}</option>`;
+  }).join('')}</select></div>`;
 const gv = (bg, id) => { const el = bg.querySelector('#' + id); return el ? el.value.trim() : ''; };
+const loading = el => { el.innerHTML = '<p class="adm-note" style="padding:24px 4px">Loading…</p>'; };
+const failBox = (el, e, retry) => {
+  el.innerHTML = `<div class="adm-alert bad"><span>⚠️</span><div><b>Could not load this screen.</b> ${esc(e.message)}</div></div>
+    <button class="adm-btn dark" id="retryBtn">Try again</button>`;
+  const b = el.querySelector('#retryBtn'); if (b) b.addEventListener('click', retry);
+};
+
+let toastTimer = null;
+function toast(msg) {
+  let el = document.querySelector('.toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'toast';
+    el.setAttribute('role', 'status');
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  requestAnimationFrame(() => el.classList.add('show'));
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 3200);
+}
+
+/* modal: onSave may return a Promise; the dialog closes only when it resolves to anything but false */
 function openModal(title, body, saveLabel, onSave) {
   const bg = document.createElement('div');
   bg.className = 'adm-modal-bg open';
   bg.innerHTML = `<div class="adm-modal"><h3>${title}</h3>${body}
+    <p class="adm-err" id="mErr" style="display:none"></p>
     <div class="adm-row-actions" style="justify-content:flex-end;margin-top:18px">
-      <button class="adm-btn" id="mCancel">Cancel</button>
-      <button class="adm-btn dark" id="mSave">${saveLabel || 'Save'}</button>
+      <button class="adm-btn" id="mCancel">${onSave ? 'Cancel' : 'Close'}</button>
+      ${onSave ? `<button class="adm-btn dark" id="mSave">${saveLabel || 'Save'}</button>` : ''}
     </div></div>`;
   document.body.appendChild(bg);
   const close = () => bg.remove();
   bg.addEventListener('click', e => { if (e.target === bg) close(); });
   bg.querySelector('#mCancel').addEventListener('click', close);
-  bg.querySelector('#mSave').addEventListener('click', () => { if (onSave(bg) !== false) close(); });
+  const save = bg.querySelector('#mSave');
+  const err = bg.querySelector('#mErr');
+  bg.showError = m => { err.textContent = m; err.style.display = 'block'; };
+  if (save) save.addEventListener('click', async () => {
+    err.style.display = 'none';
+    save.disabled = true;
+    const old = save.textContent; save.textContent = 'Saving…';
+    try {
+      const r = await onSave(bg);
+      if (r !== false) close();
+    } catch (e) {
+      bg.showError(e.message || 'Something went wrong');
+    } finally {
+      save.disabled = false; save.textContent = old;
+    }
+  });
   return bg;
 }
-const swRow = (id, label, sub, on) =>
-  `<div class="switch-row"><div class="lbl">${label}${sub ? `<em>${sub}</em>` : ''}</div>
-    <label class="switch"><input type="checkbox" id="${id}" ${on ? 'checked' : ''}><i></i></label></div>`;
+/* run an action behind a button: disables it, shows toast on success/failure */
+async function act(btn, fn, okMsg) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fn();
+    if (okMsg) toast(okMsg);
+    return r;
+  } catch (e) {
+    toast(e.message || 'Action failed');
+    return undefined;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+const confirmBox = msg => window.confirm(msg);
 
-/* content overlay: categories · reviews · discounts · messages · carts */
-function getContent() {
-  let c = null;
-  try { c = JSON.parse(localStorage.getItem(CONTENT_KEY)); } catch (e) { c = null; }
-  const base = { categories: DEMO_CATEGORIES, reviews: DEMO_REVIEWS,
-                 discounts: DEMO_DISCOUNTS, messages: DEMO_MESSAGES, carts: DEMO_ABANDONED };
-  if (!c) return base;
-  const out = {};
-  Object.keys(base).forEach(k => { out[k] = c[k] || base[k]; });
+/* open a PDF/blob from an authenticated endpoint in a new tab */
+async function openBlob(path) {
+  const w = window.open('', '_blank');
+  try {
+    const blob = await api(path, { blob: true });
+    const url = URL.createObjectURL(blob);
+    if (w) w.location = url; else window.location = url;
+  } catch (e) { if (w) w.close(); toast(e.message); }
+}
+function downloadCsv(name, rows) {
+  const csv = rows.map(r => r.map(c => '"' + String(c == null ? '' : c).replace(/"/g, '""') + '"').join(',')).join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = name; a.click();
+}
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+
+/* ---------- order status vocabulary (matches the backend OrderStatus enum) ---------- */
+const ORDER_LABEL = {
+  PENDING_PAYMENT: 'Awaiting payment', PAYMENT_CONFIRMED: 'Paid', PAID: 'Paid', PLACED: 'Placed',
+  PROCESSING: 'Processing', PROCESSING_SHIPMENT: 'Processing', PACKED: 'Packed',
+  SHIPPED: 'Shipped', IN_TRANSIT: 'In transit', DELIVERED: 'Delivered', CANCELLED: 'Cancelled'
+};
+const ORDER_CHIP = {
+  PENDING_PAYMENT: 'warn', PAYMENT_CONFIRMED: 'info', PAID: 'info', PLACED: 'info', PROCESSING: 'info',
+  PROCESSING_SHIPMENT: 'info', PACKED: 'info', SHIPPED: 'info', IN_TRANSIT: 'info', DELIVERED: 'ok', CANCELLED: 'bad'
+};
+const ORDER_RANK = {
+  PENDING_PAYMENT: 0, PAYMENT_CONFIRMED: 1, PAID: 1, PLACED: 2, PROCESSING: 3, PROCESSING_SHIPMENT: 3,
+  PACKED: 4, SHIPPED: 5, IN_TRANSIT: 6, DELIVERED: 7, CANCELLED: -1
+};
+const statusChip = s => chip(ORDER_LABEL[s] || s || '—', ORDER_CHIP[s] || '');
+const isPaidOrder = o => o && o.status && o.status !== 'PENDING_PAYMENT' && o.status !== 'CANCELLED';
+/* the stages an admin can move an order to, mirroring the backend rules */
+function nextStages(status) {
+  if (status === 'DELIVERED' || status === 'CANCELLED') return [];
+  if (status === 'PENDING_PAYMENT') return ['CANCELLED'];
+  const out = [];
+  [['PACKED', 4], ['SHIPPED', 5], ['IN_TRANSIT', 6], ['DELIVERED', 7]].forEach(([s, r]) => {
+    if (r > ORDER_RANK[status]) out.push(s);
+  });
+  if (ORDER_RANK[status] < ORDER_RANK.SHIPPED) out.push('CANCELLED');
   return out;
 }
-function saveContent(patch) {
-  let c = {};
-  try { c = JSON.parse(localStorage.getItem(CONTENT_KEY)) || {}; } catch (e) { c = {}; }
-  Object.assign(c, patch);
-  try { localStorage.setItem(CONTENT_KEY, JSON.stringify(c)); } catch (e) {}
+const customerOf = o => o.customerName || (o.shippingAddress && ((o.shippingAddress.firstName || '') + ' ' + (o.shippingAddress.lastName || '')).trim()) || '—';
+
+/* shared in-memory cache so screens don't refetch the same list within a few seconds */
+const cache = { orders: null, ordersAt: 0, products: null, productsAt: 0 };
+async function recentOrders(force) {
+  if (!force && cache.orders && Date.now() - cache.ordersAt < 15000) return cache.orders;
+  const d = await api('/api/admin/orders?page=0&size=100');
+  cache.orders = pageItems(d); cache.ordersAt = Date.now();
+  return cache.orders;
 }
-function audit(action) {
-  const log = readList(AUDIT_KEY);
-  log.unshift({ at: new Date().toISOString(), user: (sessionStorage.getItem(ADM_KEY) || 'anonymous'), action });
-  writeList(AUDIT_KEY, log.slice(0, 60));
-}
-/* advance an order and fire the WhatsApp/email journey for the new stage */
-const STAGE_KEY = { Placed: 'placed', Packed: 'packed', Shipped: 'shipped', 'Out for Delivery': 'ofd', Delivered: 'delivered' };
-const STAGE_TPL = { Placed: 'order_confirmed', Packed: 'packed_atelier', Shipped: 'shipment_tracking', 'Out for Delivery': 'out_for_delivery', Delivered: 'delivered_care' };
-function notifyStage(order, status) {
-  const cfg = getSettings().whatsapp;
-  const key = STAGE_KEY[status];
-  const tpl = STAGE_TPL[status];
-  if (!cfg.enabled || !key || !tpl || !cfg.stages[key]) return null;
-  audit(`WhatsApp ${tpl} → ${order.id} · ${(order.customer && order.customer.name) || 'customer'}`);
-  return tpl;
+async function allProducts(force) {
+  if (!force && cache.products && Date.now() - cache.productsAt < 8000) return cache.products;
+  let all = [], page = 0, last = false;
+  while (!last && page < 20) {
+    const d = await api('/api/admin/products?page=' + page + '&size=100');
+    all = all.concat(pageItems(d));
+    last = !d || d.last === true || pageItems(d).length < 100;
+    page++;
+  }
+  cache.products = all; cache.productsAt = Date.now();
+  return all;
 }
 
 /* ============================================================
-   ANALYTICS DASHBOARD — Sales · Customers · Products
+   DASHBOARD
    ============================================================ */
-const kpi = (label, value, note, neg) =>
-  `<div class="kpi"><span>${label}</span><b>${value}</b>${note ? `<em class="${neg ? 'neg' : ''}">${note}</em>` : ''}</div>`;
-
-function pseudoSeries(base, amp, seed) {
-  let s = seed, out = [];
-  for (let i = 0; i < 12; i++) { s = (s * 9301 + 49297) % 233280; out.push(Math.round(base + (s / 233280 - 0.35) * amp)); }
-  return out;
-}
-function dayLabels() {
+function dayLabelsFrom(n) {
   const out = [];
-  for (let i = 11; i >= 0; i--) {
-    out.push(new Date(Date.now() - i * 864e5).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }).replace(' ', '\u00a0'));
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 864e5);
+    out.push({ key: d.toLocaleDateString('en-CA'), label: d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }).replace(' ', ' ') });
   }
   return out;
 }
-function statusChip(s) {
-  return chip(s, { 'Placed': 'warn', 'Packed': 'info', 'Shipped': 'info', 'In Transit': 'info', 'Out for Delivery': 'info', 'Delivered': 'ok', 'Cancelled': 'bad', 'Return Requested': 'warn', 'RTO': 'bad' }[s] || '');
-}
-/* every figure below is derived — orders / catalogue / customers come from the live stores */
-function metrics() {
-  const orders = getOrders();
-  const catalog = getCatalog();
-  const live = orders.reduce((a, o) => a + (o.sub || 0), 0);
-  const baseRev = DEMO_CUSTOMERS.reduce((a, c) => a + c.spent, 0);
-  const baseOrders = DEMO_CUSTOMERS.reduce((a, c) => a + c.orders, 0);
-  const revenue = baseRev + live;
-  const orderCount = baseOrders + orders.length;
-  const prepaidPct = 100;
-  const returning = DEMO_CUSTOMERS.filter(c => c.orders > 1).length;
-  const unitRows = catalog.map(p => ({ p, sold: Math.max(3, Math.round(p.reviews / 18)) }));
-  unitRows.sort((a, b) => b.sold - a.sold);
-  return {
-    orders, catalog, revenue, orderCount, live,
-    aov: revenue / orderCount, prepaidPct, returning,
-    units: unitRows,
-    best: unitRows.slice(0, 5).map(u => ({ name: u.p.name, sold: u.sold, rev: u.sold * u.p.price })),
-    slow: unitRows.slice(-3).reverse().map(u => ({ name: u.p.name, sold: u.sold, stock: u.p.stock || ((u.p.id.length % 26) + 4) }))
-  };
+function revenueByDay(orders) {
+  const days = dayLabelsFrom(12);
+  const map = {};
+  orders.filter(isPaidOrder).forEach(o => {
+    const k = new Date(o.createdAt).toLocaleDateString('en-CA'); // local yyyy-mm-dd
+    map[k] = (map[k] || 0) + (o.totalAmount || 0);
+  });
+  return days.map(d => ({ label: d.label, v: Math.round(map[d.key] || 0) }));
 }
 
-function dashSales(m) {
-  const series = pseudoSeries(26000, 24000, 41);
-  const max = Math.max.apply(null, series);
-  const labels = dayLabels();
+function dashSales(m, orders) {
+  const series = revenueByDay(orders);
+  const max = Math.max.apply(null, series.map(s => s.v).concat([1]));
+  const prepaid = m.prepaidSharePercentage || 0;
+  const deg = Math.round(prepaid * 3.6);
+  const recent = orders.slice(0, 8);
+  const rate = (a, b) => b ? (a / b * 100).toFixed(1) + '%' : '—';
   return `
   <div class="kpis">
-    ${kpi('Revenue', money(m.revenue), '▲ 12.4% vs last period')}
-    ${kpi('Orders', m.orderCount, '▲ 8.1%')}
-    ${kpi('AOV', money(m.aov), '▲ 4.2%')}
-    ${kpi('Conversion rate', '2.8%', '▲ 0.3pp')}
-    ${kpi('Refunds', '1.1%', '▼ 0.2pp (good)', true)}
-    ${kpi('Prepaid share', m.prepaidPct + '%', 'UPI · Cards · NetBanking')}
+    ${kpi('Revenue', money(m.revenue), 'paid orders, all time')}
+    ${kpi('Orders', m.ordersCount, 'paid, not cancelled')}
+    ${kpi('AOV', money(m.aov), 'average order value')}
+    ${kpi('Conversion rate', (m.conversionRate || 0) + '%', 'paid orders ÷ product views')}
+    ${kpi('Refunds', (m.refundRate || 0) + '%', 'refunded returns ÷ orders')}
+    ${kpi('Prepaid share', prepaid + '%', 'UPI · Cards · NetBanking')}
   </div>
   <div class="adm-cards">
     <div class="adm-card">
       <h3>Revenue — last 12 days</h3>
-      <div class="bars">${series.map((v, i) => `<i class="${v === max ? 'hot' : ''}" style="height:${Math.max(6, v / max * 100)}%"><span>${labels[i]}</span></i>`).join('')}</div>
-      <p class="adm-note">Baseline demo curve plus ${money(m.live)} of live orders placed on this device.</p>
+      <div class="bars">${series.map(s => `<i class="${s.v === max && s.v > 0 ? 'hot' : ''}" style="height:${Math.max(6, s.v / max * 100)}%" title="${money(s.v)}"><span>${s.label}</span></i>`).join('')}</div>
+      <p class="adm-note">Built from your latest ${orders.length} orders (paid, not cancelled).</p>
     </div>
     <div class="adm-card">
-      <h3>Prepaid payments</h3>
-      <div class="donut" style="background:conic-gradient(var(--espresso) 0 360deg, var(--linen) 360deg 360deg)"><b>100%</b></div>
-      <div class="legend"><span><i style="background:var(--espresso)"></i>Prepaid 100%</span></div>
-      <p class="adm-note">All orders are prepaid — UPI, cards or net-banking.</p>
+      <h3>Payment mix</h3>
+      <div class="donut" style="background:conic-gradient(var(--espresso) 0 ${deg}deg, var(--linen) ${deg}deg 360deg)"><b>${Math.round(prepaid)}%</b></div>
+      <div class="legend"><span><i style="background:var(--espresso)"></i>Prepaid ${Math.round(prepaid)}%</span><span><i style="background:var(--linen)"></i>COD ${Math.round(100 - prepaid)}%</span></div>
     </div>
   </div>
   <div class="adm-grid-2">
-    <div class="adm-card"><h3>Live order ledger</h3>
-      ${m.orders.length ? tbl(['Order', 'Date', 'Value', 'Payment', 'Status'],
-        m.orders.map(o => tr([o.id, dshort(o.date), money(o.sub), o.method || '—', statusChip(o.status)]))) :
-        '<p class="adm-note">No orders on this device yet — place one at checkout and it lands here instantly.</p>'}
+    <div class="adm-card"><h3>Latest orders</h3>
+      ${recent.length ? tbl(['Order', 'Date', 'Value', 'Status'],
+        recent.map(o => tr([esc(o.orderNumber || o.id), dshort(o.createdAt), money(o.totalAmount), statusChip(o.status)]))) :
+        '<p class="adm-note">No orders yet.</p>'}
     </div>
     <div class="adm-card"><h3>Funnel — last 30 days</h3>
-      ${tbl(['Step', 'Sessions', 'Rate'], [
-        tr(['Product views', '41,900', '—']),
-        tr(['Add to cart', '8,240', '19.7%']),
-        tr(['Checkout started', '3,110', '37.7%']),
-        tr(['Orders paid', m.orderCount, '2.8%']),
-        tr(['Recovered by WhatsApp/e-mail', '182', '5.9%'])
+      ${tbl(['Step', 'Count', 'Rate'], [
+        tr(['Product views', m.productViews || 0, '—']),
+        tr(['Add to cart', m.addToCart || 0, rate(m.addToCart, m.productViews)]),
+        tr(['Checkout started', m.checkoutStarted || 0, rate(m.checkoutStarted, m.addToCart)]),
+        tr(['Orders paid (all time)', m.ordersPaid || 0, rate(m.ordersPaid, m.checkoutStarted)])
       ])}
-      <p class="adm-note">Events fire through <span class="adm-url">trackEvent()</span> → GA4 + Meta Pixel once IDs are enabled in Marketing.</p>
+      <p class="adm-note">Counts come from storefront events. They stay at zero until the storefront sends them.</p>
     </div>
   </div>`;
 }
-
-function renderDash(el) {
-  seedOrdersIfEmpty();
-  const m = metrics();
-  const tab = el.dataset.tab || 'sales';
-  el.dataset.tab = tab;
-  el.innerHTML = `
-  <div class="adm-tabbar">
-    <button data-dtab="sales" class="${tab === 'sales' ? 'active' : ''}">Sales</button>
-    <button data-dtab="customers" class="${tab === 'customers' ? 'active' : ''}">Customers</button>
-    <button data-dtab="products" class="${tab === 'products' ? 'active' : ''}">Products</button>
-  </div>
-  ${tab === 'sales' ? dashSales(m) : tab === 'customers' ? dashCustomers(m) : dashProducts(m)}`;
-  el.querySelectorAll('[data-dtab]').forEach(b => b.addEventListener('click', () => {
-    el.dataset.tab = b.dataset.dtab;
-    renderDash(el);
-  }));
-}
-
-function dashCustomers(m) {
+function dashCustomers(m, recent) {
   return `
   <div class="kpis">
-    ${kpi('Total customers', (DEMO_CUSTOMERS.length + 2179).toLocaleString('en-IN'), '▲ 9% this month')}
-    ${kpi('New (30d)', '214', 'acquisition +9%')}
-    ${kpi('Returning', pct(m.returning, DEMO_CUSTOMERS.length) + '%', 'tracked cohort of ' + DEMO_CUSTOMERS.length)}
-    ${kpi('Repeat purchase rate', '46%', '▲ 3pp')}
-    ${kpi('Avg lifetime value', money(m.revenue / DEMO_CUSTOMERS.length), '▲ ₹310')}
-    ${kpi('Blended CAC', '₹412', '▼ ₹38')}
+    ${kpi('Total customers', (m.totalCustomers || 0).toLocaleString('en-IN'), 'registered accounts')}
+    ${kpi('New (30d)', m.newCustomers30d || 0, 'joined in the last 30 days')}
   </div>
-  <div class="adm-grid-2">
-    <div class="adm-card"><h3>Customer acquisition by channel</h3>
-      ${tbl(['Channel', 'Share', 'Customers', 'CAC', 'LTV'], [
-        tr(['Instagram', '41%', '896', '₹388', '₹8,120']),
-        tr(['Direct', '24%', '524', '₹0', '₹6,940']),
-        tr(['Google', '19%', '415', '₹512', '₹7,480']),
-        tr(['WhatsApp', '9%', '197', '₹240', '₹9,650']),
-        tr(['Referral', '7%', '153', '₹180', '₹12,300'])
-      ])}
-      <p class="adm-note">Referral customers carry the highest LTV — see Marketing → Referral programme.</p>
-    </div>
-    <div class="adm-card"><h3>New vs returning · cohorts</h3>
-      ${tbl(['Segment', 'Count', 'Share', 'Avg LTV'], [
-        tr(['New (first order)', '1,180', '54%', '₹4,150']),
-        tr(['Returning', '1,005', '46%', '₹11,300']),
-        tr(['Repeat within 90 days', '382', '17%', '₹14,880'])
-      ])}
-      ${tbl(['Cohort', 'Customers', 'Repeat rate'], [
-        tr(['Joined Nov 2025', '212', '52%']),
-        tr(['Joined Dec 2025', '188', '48%']),
-        tr(['Joined Jan 2026', '236', '41%'])
-      ])}
-    </div>
+  <div class="adm-card" style="margin-top:14px"><h3>Newest customers</h3>
+    ${recent.length ? tbl(['Customer', 'Email', 'Joined'], recent.map(c => tr([esc(c.name || '—'), esc(c.email || '—'), dshort(c.joinedAt)]))) : '<p class="adm-note">No customers yet.</p>'}
+    <p class="adm-note">Acquisition channels, repeat rate and lifetime value need more tracking — parked for a later update.</p>
   </div>`;
 }
-
 function dashProducts(m) {
-  const best = m.best;
+  const best = m.bestSellers || [];
+  const top = Math.max.apply(null, best.map(b => b.units).concat([1]));
   return `
   <div class="kpis">
-    ${kpi('SKUs live', m.catalog.length, 'catalogue synced')}
-    ${kpi('Units sold', m.units.reduce((a, u) => a + u.sold, 0), 'all channels')}
-    ${kpi('Revenue / SKU', money(m.revenue / m.catalog.length), 'median ₹9.4k')}
-    ${kpi('Low stock', m.catalog.filter(p => (p.stock || 25) < 10).length, 'restock soon', true)}
+    ${kpi('Products', m.skusLive || 0, 'in the catalogue')}
+    ${kpi('Units sold', m.unitsSold || 0, 'paid orders')}
+    ${kpi('Revenue / product', money(m.revenuePerSku), 'average')}
+    ${kpi('Low stock (≤5)', m.lowStockCount || 0, 'restock soon', (m.lowStockCount || 0) > 0)}
   </div>
   <div class="adm-grid-2">
     <div class="adm-card"><h3>Best sellers</h3>
-      ${tbl(['Product', 'Units', 'Revenue'], best.map(b => tr([b.name, b.sold, moneyK(b.rev)])))}
-      <p class="adm-note">Derived from review volume × price — swap for real unit data once orders stream in.</p>
+      ${best.length ? tbl(['Product', 'Units', 'Revenue'], best.map(b => tr([esc(b.product), b.units, esc(b.revenue)]))) : '<p class="adm-note">No sales yet.</p>'}
     </div>
-    <div class="adm-card"><h3>Slow movers &amp; stock</h3>
-      ${tbl(['Product', 'Units', 'Stock'], m.slow.map(s => tr([s.name, s.sold, chip(s.stock + ' pcs', s.stock < 10 ? 'warn' : 'ok')])))}
-      <p class="adm-note">Slow movers feed bundle suggestions and the "Back in stock" journey.</p>
+    <div class="adm-card"><h3>Units by product</h3>
+      ${best.length ? best.map(b => `<div style="margin-bottom:12px"><div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:4px"><span>${esc(b.product)}</span><b>${b.units}</b></div><div class="progress"><i style="width:${Math.min(100, b.units / top * 100)}%"></i></div></div>`).join('') : '<p class="adm-note">Nothing to show yet.</p>'}
     </div>
-  </div>
-  <div class="adm-card" style="margin-top:14px"><h3>Product-wise revenue</h3>
-    ${best.map(b => `<div style="margin-bottom:12px"><div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:4px"><span>${b.name}</span><b>${moneyK(b.rev)}</b></div><div class="progress"><i style="width:${Math.min(100, b.rev / best[0].rev * 100)}%"></i></div></div>`).join('')}
   </div>`;
+}
+async function renderDash(el) {
+  const tab = el.dataset.tab || 'sales';
+  el.dataset.tab = tab;
+  loading(el);
+  try {
+    const [m, orders, custs] = await Promise.all([
+      api('/api/admin/metrics'), recentOrders(true),
+      tab === 'customers' ? api('/api/admin/customers?page=0&size=8') : Promise.resolve(null)
+    ]);
+    el.innerHTML = `
+    <div class="adm-tabbar">
+      <button data-dtab="sales" class="${tab === 'sales' ? 'active' : ''}">Sales</button>
+      <button data-dtab="customers" class="${tab === 'customers' ? 'active' : ''}">Customers</button>
+      <button data-dtab="products" class="${tab === 'products' ? 'active' : ''}">Products</button>
+    </div>
+    ${tab === 'sales' ? dashSales(m, orders) : tab === 'customers' ? dashCustomers(m, custs ? custs.items || [] : []) : dashProducts(m)}`;
+    el.querySelectorAll('[data-dtab]').forEach(b => b.addEventListener('click', () => { el.dataset.tab = b.dataset.dtab; renderDash(el); }));
+  } catch (e) { if (e.status !== 401) failBox(el, e, () => renderDash(el)); }
 }
 
 /* ============================================================
-   CATALOGUE — Products
+   ORDERS
    ============================================================ */
-function productRow(p, i) {
-  const stock = p.stock || 25;
-  return `<tr data-row>
-    <td><div class="adm-prod"><img class="adm-thumb" src="${p.img}" alt="${esc(p.name)}" loading="lazy">
-      <div><b>${esc(p.name)}</b><br><span class="pill">${esc(catLabel(p))}</span></div></div></td>
-    <td>${esc(p.sku || '—')}</td>
-    <td>${money(p.price)}${p.mrp > p.price ? `<br><span class="pill">MRP ${money(p.mrp)}</span>` : ''}</td>
-    <td>${chip(stock + ' pcs', stock < 10 ? 'warn' : 'ok')}</td>
-    <td>${hsnFor(p)}</td>
-    <td>${(STORE.gst.rate * 100).toFixed(0)}%</td>
-    <td><span class="adm-url">/product.html?id=${esc(p.id)}</span></td>
-    <td>${chip(p.status || 'Live', p.status === 'Draft' ? 'warn' : 'ok')}</td>
-    <td><div class="adm-row-actions">
-      <button class="adm-btn" data-edit="${i}">Edit</button>
-      <button class="adm-btn" data-seo="${i}">SEO</button>
-      <button class="adm-btn" data-del="${i}">Delete</button>
-    </div></td></tr>`;
-}
-function renderProducts(el) {
-  const catalog = getCatalog();
+const ORDER_FILTERS = [['', 'All'], ['PENDING_PAYMENT', 'Awaiting payment'], ['PAID', 'Paid'], ['PROCESSING_SHIPMENT', 'Processing'],
+  ['PACKED', 'Packed'], ['SHIPPED', 'Shipped'], ['IN_TRANSIT', 'In transit'], ['DELIVERED', 'Delivered'], ['CANCELLED', 'Cancelled']];
+
+async function renderOrders(el) {
+  const f = el.dataset.f || '';
+  const page = +(el.dataset.page || 0);
   const q = (el.dataset.q || '').toLowerCase();
-  const rows = catalog.filter(p => !q || p.name.toLowerCase().includes(q) || (p.sku || '').toLowerCase().includes(q) || catLabel(p).toLowerCase().includes(q));
+  if (!el.dataset.ready) loading(el);
+  let data;
+  try {
+    data = await api('/api/admin/orders?page=' + page + '&size=25' + (f ? '&status=' + f : ''));
+  } catch (e) { if (e.status !== 401) failBox(el, e, () => renderOrders(el)); return; }
+  el.dataset.ready = '1';
+  const orders = pageItems(data);
+  const total = data.totalElements != null ? data.totalElements : orders.length;
+  const pages = data.totalPages || 1;
+  const list = orders.filter(o => !q || (o.orderNumber || '').toLowerCase().includes(q) ||
+    customerOf(o).toLowerCase().includes(q) || (o.customerEmail || '').toLowerCase().includes(q));
   el.innerHTML = `
-  <div class="adm-alert">Products marked <b>Live</b> appear on the storefront immediately. Edits are written to the catalogue overlay and picked up by <span class="adm-url">getCatalog()</span> on every page — no deploy needed.</div>
+  <div class="adm-alert"><span>💬</span><div><b>Every stage change e-mails the customer</b> and adds a line to the tracking timeline they see. Orders waiting for payment can only be cancelled — only the Razorpay payment confirmation can mark an order paid.</div></div>
   <div class="adm-toolbar">
     <div class="adm-searchbar"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
-      <input id="pQ" placeholder="Search name, SKU or category…" value="${esc(el.dataset.q || '')}"></div>
-    <span class="pill">${rows.length} of ${catalog.length} SKUs</span>
-    <button class="adm-btn dark" id="pAdd">+ Add product</button>
-  </div>
-  ${tbl(['Product', 'SKU', 'Price', 'Stock', 'HSN', 'GST', 'URL slug', 'Status', 'Actions'], rows.length ? rows.map((p, i) => productRow(p, catalog.indexOf(p))) : ['<tr><td colspan="9"><p class="adm-note">No products match that search.</p></td></tr>'])}
-  <p class="adm-note">The product editor also carries SEO title, meta description, URL slug, H1, image alt text, canonical and schema type (brief §11).</p>`;
-  const qi = el.querySelector('#pQ');
-  qi.addEventListener('input', () => { el.dataset.q = qi.value; renderProducts(el); qi.focus(); });
-  el.querySelector('#pAdd').addEventListener('click', () => productModal(null, el));
-  el.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => productModal(catalog[+b.dataset.edit], el)));
-  el.querySelectorAll('[data-seo]').forEach(b => b.addEventListener('click', () => productSeoModal(catalog[+b.dataset.seo], el)));
-  el.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => {
-    const p = catalog[+b.dataset.del];
-    if (!confirm(`Remove "${p.name}" from the live catalogue?\n\nThis writes an Unlisted override — js/products.js keeps the master record.`)) return;
-    const ov = getOverrides().filter(o => o.id !== p.id);
-    ov.push({ id: p.id, status: 'Unlisted' });
-    saveOverrides(ov);
-    audit('Product unlisted: ' + p.name);
-    toast(p.name + ' is now unlisted');
-    renderProducts(el);
-  }));
-}
-function productModal(p, el) {
-  const cats = getContent().categories.filter(c => c.status === 'Live');
-  const body = `
-  <div class="f-grid">
-    ${fld('pmName', 'Product name', p ? p.name : '', 'text', true)}
-    ${fld('pmSku', 'SKU', p ? (p.sku || '') : 'AJ-XX-000')}
-    ${fld('pmPrice', 'Price (₹)', p ? p.price : '', 'number')}
-    ${fld('pmMrp', 'MRP (₹)', p ? p.mrp : '', 'number')}
-    <div class="field"><label>Category</label><select id="pmCat">${cats.map(c => `<option value="${c.id}" ${p && (p.cat || []).includes(c.id) ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
-    <div class="field"><label>Collection</label><select id="pmColl">${['new', 'bestsellers', 'spotted', 'bridal', 'core', 'everyday', 'festive'].map(c => `<option ${p && p.collection === c ? 'selected' : ''}>${c}</option>`).join('')}</select></div>
-    ${fld('pmStock', 'Stock (pcs)', p ? (p.stock || 25) : 25, 'number')}
-    ${fld('pmHsn', 'HSN code', p ? hsnFor(p) : STORE.gst.hsnDefault)}
-    <div class="field"><label>Status</label><select id="pmStatus">${['Live', 'Draft', 'Unlisted'].map(s => `<option ${p && (p.status || 'Live') === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
-    <div class="field"><label>Badge</label><select id="pmTag">${['None', 'New', 'Bestseller'].map(t => `<option ${p && p.tag === t ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
-    <div class="field"><label>URL slug (product id)</label>${'<input id="pmId" value="' + esc(p ? p.id : '') + '"' + (p ? ' readonly style="background:var(--linen)"' : '') + '>'}</div>
-    ${fld('pmImg', 'Primary image URL', p ? p.img : '', 'text', true)}
-    ${fld('pmAlt', 'Image alt text', p ? p.name : '', 'text', true)}
-    ${fld('pmDesc', 'Description', p ? (p.desc || '') : '', 'text', true)}
-  </div>
-  <p class="adm-note">Saving an existing product updates the live catalogue overlay; new products are added to it with a fresh slug.</p>`;
-  openModal(p ? 'Edit product' : 'Add product', body, p ? 'Save changes' : 'Create product', bg => {
-    const id = (gv(bg, 'pmId') || gv(bg, 'pmName')).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    if (!id || !gv(bg, 'pmName')) { toast('Product name is required'); return false; }
-    const rec = {
-      id,
-      name: gv(bg, 'pmName'),
-      sku: gv(bg, 'pmSku'),
-      price: +gv(bg, 'pmPrice') || 0,
-      mrp: +gv(bg, 'pmMrp') || +gv(bg, 'pmPrice') || 0,
-      cat: [gv(bg, 'pmCat')],
-      collection: gv(bg, 'pmColl'),
-      stock: +gv(bg, 'pmStock') || 0,
-      hsn: gv(bg, 'pmHsn'),
-      status: gv(bg, 'pmStatus'),
-      tag: gv(bg, 'pmTag') === 'None' ? '' : gv(bg, 'pmTag'),
-      img: gv(bg, 'pmImg'),
-      seoTitle: gv(bg, 'pmName') + ' — ' + STORE.brand,
-      meta: gv(bg, 'pmDesc').slice(0, 155),
-      h1: gv(bg, 'pmName'),
-      alt: gv(bg, 'pmAlt')
-    };
-    const ov = getOverrides().filter(o => o.id !== id);
-    ov.push(rec);
-    saveOverrides(ov);
-    audit((p ? 'Product updated: ' : 'Product created: ') + rec.name);
-    toast(rec.name + ' saved — live on the storefront');
-    renderProducts(el);
-    return true;
-  });
-}
-
-function productSeoModal(p, el) {
-  const body = `
-  <div class="f-grid">
-    ${fld('sTitle', 'SEO title (' + (p.seoTitle ? p.seoTitle.length : (p.name + ' — ' + STORE.brand).length) + '/60 chars)', p.seoTitle || (p.name + ' — ' + STORE.brand), 'text', true)}
-    <div class="field full"><label>Meta description (155 chars)</label><input id="sMeta" value="${esc(p.meta || (p.desc || '').slice(0, 155))}" maxlength="155"></div>
-    ${fld('sH1', 'H1 heading', p.h1 || p.name, 'text', true)}
-    ${fld('sSlug', 'URL slug / canonical path', '/product.html?id=' + p.id, 'text', true)}
-    ${fld('sAlt', 'Image alt text', p.alt || p.name, 'text', true)}
-    ${fld('sCanon', 'Canonical URL', 'https://amourjewels.in/product.html?id=' + p.id, 'text', true)}
-    <div class="field"><label>Schema markup</label><select id="sSchema"><option>Product + Offer + AggregateRating</option><option>Product (no rating)</option><option>BreadcrumbList + Product</option></select></div>
-    <div class="field"><label>Indexing</label><select id="sIndex"><option>Index, follow</option><option>Noindex, follow</option></select></div>
-  </div>
-  <p class="adm-note" style="margin-bottom:8px"><b>Google preview</b></p>
-  <div class="adm-code" id="sPreview">${esc(p.name)} — ${esc(STORE.brand)}
-https://amourjewels.in/product.html?id=${esc(p.id)}
-${esc((p.desc || '').slice(0, 155))}</div>`;
-  const bg = openModal('SEO &amp; metadata — ' + esc(p.name), body, 'Save SEO', box => {
-    const ov = getOverrides().filter(o => o.id !== p.id);
-    ov.push(Object.assign({
-      id: p.id, seoTitle: gv(box, 'sTitle'), meta: gv(box, 'sMeta'), h1: gv(box, 'sH1'),
-      alt: gv(box, 'sAlt'), canonical: gv(box, 'sCanon'), schema: box.querySelector('#sSchema').value
-    }));
-    saveOverrides(ov);
-    audit('SEO updated: ' + p.name);
-    toast('SEO fields saved for ' + p.name);
-    renderProducts(el);
-    return true;
-  });
-  const refresh = () => {
-    const prev = bg.querySelector('#sPreview');
-    prev.textContent = gv(bg, 'sTitle') + '\n' + 'https://amourjewels.in/product.html?id=' + p.id + '\n' + gv(bg, 'sMeta');
-  };
-  ['sTitle', 'sMeta'].forEach(id => bg.querySelector('#' + id).addEventListener('input', refresh));
-}
-/* ============================================================
-   CATALOGUE — Categories (taxonomy, SEO per category, sort order)
-   ============================================================ */
-function renderCategories(el) {
-  const cats = getContent().categories.slice().sort((a, b) => a.order - b.order);
-  const catalog = getCatalog();
-  const count = id => catalog.filter(p => (p.cat || []).includes(id)).length;
-  el.innerHTML = `
-  <div class="adm-alert">Category order drives the shop filters and the homepage tiles. Each category carries its own <b>SEO title, H1 and meta description</b>.</div>
-  <div class="adm-toolbar">
-    <span class="pill">${cats.length} categories · ${cats.filter(c => c.status === 'Live').length} live</span>
-    <button class="adm-btn dark" id="cAdd">+ Add category</button>
-  </div>
-  ${tbl(['#', 'Category', 'Slug', 'Products', 'Parent', 'SEO title', 'Status', 'Actions'], cats.map((c, i) => `<tr>
-    <td>${c.order}</td>
-    <td><b>${esc(c.name)}</b><br><span class="pill">H1: ${esc(c.h1)}</span></td>
-    <td><span class="adm-url">/shop?cat=${esc(c.id)}</span></td>
-    <td>${count(c.id)}</td>
-    <td>${esc(c.parent)}</td>
-    <td class="pill" style="max-width:260px">${esc((c.name + ' — ' + STORE.brand).slice(0, 48))}…</td>
-    <td>${chip(c.status, c.status === 'Live' ? 'ok' : 'warn')}</td>
-    <td><div class="adm-row-actions">
-      <button class="adm-btn" data-cedit="${i}">Edit</button>
-      <button class="adm-btn" data-cup="${i}">↑</button>
-      <button class="adm-btn" data-cdown="${i}">↓</button>
-      <button class="adm-btn" data-cdel="${i}">Delete</button>
-    </div></td></tr>`))}
-  <p class="adm-note">Products attach to a category from the product editor. Deleting a category here keeps its products but removes the filter tile.</p>`;
-  const persist = list => { saveContent({ categories: list }); renderCategories(el); };
-  el.querySelector('#cAdd').addEventListener('click', () => categoryModal(null, el));
-  el.querySelectorAll('[data-cedit]').forEach(b => b.addEventListener('click', () => categoryModal(cats[+b.dataset.cedit], el)));
-  el.querySelectorAll('[data-cup]').forEach(b => b.addEventListener('click', () => {
-    const i = +b.dataset.cup;
-    if (!i) return toast('Already first');
-    const list = cats.slice();
-    [list[i - 1].order, list[i].order] = [list[i].order, list[i - 1].order];
-    list.sort((a, b2) => a.order - b2.order);
-    list.forEach((c, idx) => c.order = idx + 1);
-    persist(list);
-  }));
-  el.querySelectorAll('[data-cdown]').forEach(b => b.addEventListener('click', () => {
-    const i = +b.dataset.cdown;
-    if (i === cats.length - 1) return toast('Already last');
-    const list = cats.slice();
-    [list[i + 1].order, list[i].order] = [list[i].order, list[i + 1].order];
-    list.sort((a, b2) => a.order - b2.order);
-    list.forEach((c, idx) => c.order = idx + 1);
-    persist(list);
-  }));
-  el.querySelectorAll('[data-cdel]').forEach(b => b.addEventListener('click', () => {
-    const c = cats[+b.dataset.cdel];
-    if (!confirm(`Delete the "${c.name}" category?`)) return;
-    audit('Category deleted: ' + c.name);
-    persist(cats.filter(x => x.id !== c.id).map((x, idx) => Object.assign(x, { order: idx + 1 })));
-    toast('Category deleted');
-  }));
-}
-
-function categoryModal(c, el) {
-  const body = `
-  <div class="f-grid">
-    ${fld('cName', 'Category name', c ? c.name : '', 'text', true)}
-    ${fld('cId', 'URL slug', c ? c.id : 'new-category', 'text')}
-    ${fld('cOrder', 'Sort order', c ? c.order : 99, 'number')}
-    <div class="field"><label>Status</label><select id="cStatus">${['Live', 'Draft'].map(s => `<option ${c && c.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
-    ${fld('cH1', 'H1 heading', c ? c.h1 : '', 'text', true)}
-    ${fld('cMeta', 'Meta description', c ? c.meta : '', 'text', true)}
-    ${fld('cTitle', 'SEO title', c ? (c.name + ' — ' + STORE.brand) : '', 'text', true)}
-  </div>`;
-  openModal(c ? 'Edit category' : 'Add category', body, 'Save category', bg => {
-    const name = gv(bg, 'cName');
-    if (!name) { toast('Category name is required'); return false; }
-    const list = getContent().categories.filter(x => x.id !== (c ? c.id : gv(bg, 'cId')));
-    list.push({
-      id: gv(bg, 'cId').toLowerCase().replace(/[^a-z0-9]+/g, '-'),
-      name, order: +gv(bg, 'cOrder') || 99, status: bg.querySelector('#cStatus').value,
-      h1: gv(bg, 'cH1') || name, meta: gv(bg, 'cMeta'), parent: c ? c.parent : '—'
-    });
-    saveContent({ categories: list.sort((a, b) => a.order - b.order) });
-    audit((c ? 'Category updated: ' : 'Category created: ') + name);
-    toast('Category saved');
-    renderCategories(el);
-    return true;
-  });
-}
-
-/* ============================================================
-   INVENTORY — stock levels, valuation, low-stock alerts
-   ============================================================ */
-function renderInventory(el) {
-  const catalog = getCatalog();
-  const rows = catalog.map(p => ({ p, stock: p.stock || ((p.id.length % 26) + 4) }));
-  const low = rows.filter(r => r.stock > 0 && r.stock < 10);
-  const out = rows.filter(r => r.stock === 0);
-  const value = rows.reduce((a, r) => a + r.stock * r.p.price, 0);
-  const alerts = getAlerts();
-  el.innerHTML = `
-  <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(165px,1fr))">
-    ${kpi('SKUs tracked', rows.length, 'all categories')}
-    ${kpi('Low stock (&lt;10)', low.length, low.length ? 'restock soon' : 'all healthy', low.length > 0)}
-    ${kpi('Out of stock', out.length, out.length ? 'blocking sales' : 'none', out.length > 0)}
-    ${kpi('Stock value', moneyK(value), 'at retail price')}
-  </div>
-  ${low.length || out.length ? `<div class="adm-alert warn"><span>⚠️</span><div><b>${low.length + out.length} SKUs need attention.</b> Restocking writes a quantity override; the ops team is alerted on WhatsApp at 08:00 IST.</div></div>` : ''}
-  ${tbl(['Product', 'SKU', 'On hand', 'Unit price', 'Stock value', 'Status', 'Actions'], rows.map(r => `<tr>
-    <td><div class="adm-prod"><img class="adm-thumb" src="${r.p.img}" alt="${esc(r.p.name)}" loading="lazy"><div><b>${esc(r.p.name)}</b><br><span class="pill">${esc(catLabel(r.p))}</span></div></div></td>
-    <td>${esc(r.p.sku || '—')}</td>
-    <td><b>${r.stock}</b> pcs</td>
-    <td>${money(r.p.price)}</td>
-    <td>${moneyK(r.stock * r.p.price)}</td>
-    <td>${r.stock === 0 ? chip('Out of stock', 'bad') : r.stock < 10 ? chip('Low', 'warn') : chip('In stock', 'ok')}</td>
-    <td><div class="adm-row-actions">
-      <button class="adm-btn dark" data-restock="${r.p.id}">Restock</button>
-      <button class="adm-btn" data-alert="${r.p.id}">Alert ops</button>
-    </div></td></tr>`))}
-  <div class="adm-card" style="margin-top:14px"><h3>Low-stock alert log</h3>
-    ${alerts.length ? tbl(['Raised', 'Product', 'Level', 'Channel'], alerts.slice(0, 8).map(a => tr([dshort(a.at), esc(a.product), a.stock + ' pcs', chip('WhatsApp + e-mail', 'info')]))) : '<p class="adm-note">No alerts raised yet. "Alert ops" logs a WhatsApp/e-mail alert and it appears here.</p>'}
-    <p class="adm-note">Thresholds: 10 pcs warns, 4 pcs escalates, 0 pcs blocks the buy button on the PDP.</p>
-  </div>`;
-  el.querySelectorAll('[data-restock]').forEach(b => b.addEventListener('click', () => {
-    const p = catalog.find(x => x.id === b.dataset.restock);
-    const body = `<div class="f-grid">
-      ${fld('rsQty', 'Units received', 25, 'number')}
-      ${fld('rsNote', 'Reference (PO / karigar)', 'PO-' + Math.random().toString(36).slice(2, 7).toUpperCase())}
-    </div><p class="adm-note">Current on hand: ${p.stock || 0} pcs.</p>`;
-    openModal('Restock — ' + esc(p.name), body, 'Add to stock', bg => {
-      const add = +gv(bg, 'rsQty') || 0;
-      const ov = getOverrides().filter(o => o.id !== p.id);
-      ov.push({ id: p.id, stock: (p.stock || 0) + add });
-      saveOverrides(ov);
-      audit(`Restocked ${p.name} +${add} (${gv(bg, 'rsNote')})`);
-      toast(`+${add} pcs added to ${p.name}`);
-      renderInventory(el);
-      return true;
-    });
-  }));
-  el.querySelectorAll('[data-alert]').forEach(b => b.addEventListener('click', () => {
-    const p = catalog.find(x => x.id === b.dataset.alert);
-    const list = getAlerts();
-    list.unshift({ at: new Date().toISOString(), product: p.name, stock: p.stock || 0 });
-    saveAlerts(list);
-    audit('Low-stock alert raised: ' + p.name);
-    toast('Ops alerted on WhatsApp — logged below');
-    renderInventory(el);
-  }));
-}
-
-/* ============================================================
-   ORDERS — fulfilment, AWB, WhatsApp journey
-   ============================================================ */
-const ADM_STAGES = ['Placed', 'Packed', 'Shipped', 'In Transit', 'Out for Delivery', 'Delivered'];
-
-function renderOrders(el) {
-  seedOrdersIfEmpty();
-  const orders = getOrders();
-  const f = el.dataset.f || 'All';
-  const q = (el.dataset.q || '').toLowerCase();
-  const list = orders.filter(o => (f === 'All' || o.status === f) &&
-    (!q || o.id.toLowerCase().includes(q) || ((o.customer && o.customer.name) || '').toLowerCase().includes(q)));
-  const countBy = s => orders.filter(o => o.status === s).length;
-  el.innerHTML = `
-  <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
-    ${kpi('Orders', orders.length, 'live on this device')}
-    ${kpi('Awaiting packing', countBy('Placed'), 'SLA 24 hrs', countBy('Placed') > 0)}
-    ${kpi('In transit', countBy('Shipped') + countBy('In Transit') + countBy('Out for Delivery'), 'courier tracking live')}
-    ${kpi('Delivered', countBy('Delivered'), 'review request scheduled')}
-  </div>
-  <div class="adm-alert"><span>💬</span><div><b>Order journey is automated.</b> Advancing a stage sends the matching WhatsApp + e-mail template, writes the tracking link and appends the event to the customer timeline. Stage toggles live in WhatsApp.</div></div>
-  <div class="adm-toolbar">
-    <div class="adm-searchbar"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
-      <input id="oQ" placeholder="Search order id or customer…" value="${esc(el.dataset.q || '')}"></div>
-    <select id="oF">${['All'].concat(ADM_STAGES, ['Cancelled', 'Return Requested']).map(s => `<option ${f === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
-    <span class="pill">${list.length} shown</span>
-    <button class="adm-btn" id="oExport">Export CSV</button>
+      <input id="oQ" placeholder="Search this page by order no., name or e-mail…" value="${esc(el.dataset.q || '')}"></div>
+    <select id="oF">${ORDER_FILTERS.map(([v, t]) => `<option value="${v}" ${f === v ? 'selected' : ''}>${t}</option>`).join('')}</select>
+    <span class="pill">${total} order${total === 1 ? '' : 's'}${f ? ' in this filter' : ''}</span>
+    <button class="adm-btn" id="oRefresh">Refresh</button>
+    <button class="adm-btn" id="oExport">Export page CSV</button>
   </div>
   ${list.length ? tbl(['Order', 'Customer', 'Items', 'Value', 'Payment', 'Courier / AWB', 'Status', 'Actions'], list.map(o => {
     const idx = orders.indexOf(o);
-    const next = ADM_STAGES[ADM_STAGES.indexOf(o.status) + 1];
+    const next = nextStages(o.status).filter(s => s !== 'CANCELLED')[0];
     return `<tr>
-      <td><b>${o.id}</b><br><span class="pill">${dshort(o.date)}</span></td>
-      <td>${esc((o.customer && o.customer.name) || '—')}<br><span class="pill">${esc((o.customer && o.customer.city) || '')} ${esc((o.customer && o.customer.pin) || '')}</span></td>
-      <td>${(o.items || []).length}<br><span class="pill">${esc((o.items && o.items[0] && o.items[0].name) || '')}</span></td>
-      <td>${money(o.sub)}</td>
-      <td>${esc(o.method || '—')}</td>
-      <td>${esc(o.courier || '—')}<br><span class="pill">${esc(o.awb || '—')}</span></td>
+      <td><b>${esc(o.orderNumber || o.id)}</b><br><span class="pill">${dtime(o.createdAt)}</span></td>
+      <td>${esc(customerOf(o))}<br><span class="pill">${esc(o.customerEmail || '')}</span></td>
+      <td>${(o.items || []).reduce((a, i) => a + (i.quantity || 0), 0)}<br><span class="pill">${esc((o.items && o.items[0] && o.items[0].title) || '')}</span></td>
+      <td>${money(o.totalAmount)}</td>
+      <td>${esc(o.paymentMethod || 'Razorpay')}</td>
+      <td>${esc(o.courierName || '—')}<br><span class="pill">${esc(o.awbNumber || o.trackingNumber || '—')}</span></td>
       <td>${statusChip(o.status)}</td>
       <td><div class="adm-row-actions">
-        ${next ? `<button class="adm-btn dark" data-next="${idx}">Mark ${next}</button>` : ''}
+        ${next ? `<button class="adm-btn dark" data-next="${idx}">Mark ${ORDER_LABEL[next]}</button>` : ''}
         <button class="adm-btn" data-view="${idx}">Manage</button>
       </div></td></tr>`;
-  })) : '<p class="adm-note">No orders match this filter. Place an order through checkout and it appears here instantly.</p>'}
-  <p class="adm-note">In production this screen syncs from the commerce backend and pushes AWB numbers back to the courier API.</p>`;
+  })) : '<p class="adm-note">No orders match this view.</p>'}
+  <div class="adm-toolbar" style="margin-top:12px">
+    <button class="adm-btn" id="oPrev" ${page <= 0 ? 'disabled' : ''}>← Newer</button>
+    <span class="pill">Page ${page + 1} of ${Math.max(pages, 1)}</span>
+    <button class="adm-btn" id="oNext" ${page + 1 >= pages ? 'disabled' : ''}>Older →</button>
+  </div>`;
   const qi = el.querySelector('#oQ');
-  qi.addEventListener('input', () => { el.dataset.q = qi.value; renderOrders(el); qi.focus(); });
-  el.querySelector('#oF').addEventListener('change', e => { el.dataset.f = e.target.value; renderOrders(el); });
+  qi.addEventListener('input', debounce(() => { el.dataset.q = qi.value; renderOrders(el).then(() => { const n = el.querySelector('#oQ'); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }); }, 300));
+  el.querySelector('#oF').addEventListener('change', e => { el.dataset.f = e.target.value; el.dataset.page = 0; renderOrders(el); });
+  el.querySelector('#oRefresh').addEventListener('click', () => renderOrders(el));
+  el.querySelector('#oPrev').addEventListener('click', () => { el.dataset.page = page - 1; renderOrders(el); });
+  el.querySelector('#oNext').addEventListener('click', () => { el.dataset.page = page + 1; renderOrders(el); });
   el.querySelector('#oExport').addEventListener('click', () => {
-    const csv = [['Order', 'Date', 'Customer', 'City', 'PIN', 'Value', 'Payment', 'Status', 'Courier', 'AWB']]
-      .concat(orders.map(o => [o.id, o.date, (o.customer && o.customer.name) || '', (o.customer && o.customer.city) || '', (o.customer && o.customer.pin) || '', o.sub, o.method || '', o.status, o.courier || '', o.awb || '']))
-      .map(r => r.map(c => '"' + String(c).replace(/"/g, '""') + '"').join(',')).join('\r\n');
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-    a.download = 'amour-orders.csv'; a.click();
-    toast('Orders exported to CSV');
+    downloadCsv('amour-orders.csv', [['Order', 'Date', 'Customer', 'Email', 'Phone', 'City', 'PIN', 'Total', 'Status', 'Courier', 'AWB']]
+      .concat(orders.map(o => [o.orderNumber, o.createdAt, customerOf(o), o.customerEmail, o.customerPhone,
+        (o.shippingAddress || {}).city, (o.shippingAddress || {}).zipCode, o.totalAmount, o.status, o.courierName, o.awbNumber || o.trackingNumber])));
   });
-  el.querySelectorAll('[data-next]').forEach(b => b.addEventListener('click', () => {
+  el.querySelectorAll('[data-next]').forEach(b => b.addEventListener('click', async () => {
     const o = orders[+b.dataset.next];
-    const next = ADM_STAGES[ADM_STAGES.indexOf(o.status) + 1];
-    o.status = next;
-    if (next === 'Shipped') { o.courier = o.courier && o.courier !== '—' ? o.courier : 'Delhivery'; o.awb = 'DL' + Math.floor(23456000 + Math.random() * 9e5); }
-    saveOrders(orders);
-    const tpl = notifyStage(o, next);
-    audit(`${o.id} → ${next}`);
-    toast(`${o.id} marked ${next}${tpl ? ' · WhatsApp ' + tpl + ' sent' : ''}`);
-    renderOrders(el);
+    const next = nextStages(o.status).filter(s => s !== 'CANCELLED')[0];
+    const needsTracking = (next === 'SHIPPED' || next === 'IN_TRANSIT') && !(o.trackingNumber || o.awbNumber);
+    if (needsTracking) { orderModal(o, el, next); return; }
+    const done = await act(b, () => api('/api/admin/orders/' + encodeURIComponent(o.id) + '/stage', { method: 'PATCH', body: { status: next } }),
+      (o.orderNumber || 'Order') + ' marked ' + ORDER_LABEL[next] + ' — customer e-mailed');
+    if (done) renderOrders(el);
   }));
   el.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => orderModal(orders[+b.dataset.view], el)));
 }
-function orderModal(o, el) {
-  const gst = gstSplit(o.sub || 0, STORE.gst.rate, (o.customer && o.customer.state) || STORE.sellerState);
-  const stageIdx = ADM_STAGES.indexOf(o.status);
-  const timeline = ADM_STAGES.map((s, i) => `<div style="display:flex;gap:12px;padding:8px 0;border-bottom:1px solid var(--line-soft)">
-      <span style="min-width:120px">${s}</span>
-      <span>${i < stageIdx ? chip('Done', 'ok') : i === stageIdx ? chip('Current', 'info') : chip('Pending', '')}</span>
-    </div>`).join('');
+
+function orderModal(o, el, preselect) {
+  const a = o.shippingAddress || {};
+  const stages = nextStages(o.status);
+  const timeline = (o.trackingTimeline || []).slice().reverse().map(t =>
+    `<div style="display:flex;gap:12px;padding:8px 0;border-bottom:1px solid var(--line-soft)">
+      <span style="min-width:110px">${statusChip(t.status)}</span>
+      <span style="flex:1">${esc(t.description || '')}<br><span class="pill">${dtime(t.timestamp)}</span></span></div>`).join('');
   const body = `
   <div class="adm-mini" style="margin-bottom:16px">
-    <div><span>Order</span><b>${o.id}</b></div>
-    <div><span>Value</span><b>${money(o.sub)}</b></div>
-    <div><span>Payment</span><b>${esc(o.method || '—')}</b></div>
-    <div><span>Status</span><b>${o.status}</b></div>
+    <div><span>Order</span><b>${esc(o.orderNumber || o.id)}</b></div>
+    <div><span>Total</span><b>${money(o.totalAmount)}</b></div>
+    <div><span>Payment</span><b>${esc(o.paymentMethod || 'Razorpay')}</b></div>
+    <div><span>Status</span><b>${esc(ORDER_LABEL[o.status] || o.status)}</b></div>
   </div>
   <div class="adm-grid-2">
     <div>
-      <h3 style="font-size:13px;margin-bottom:10px">Timeline</h3>${timeline}
-      <h3 style="font-size:13px;margin:16px 0 10px">Customer</h3>
+      <h3 style="font-size:13px;margin-bottom:10px">Timeline</h3>${timeline || '<p class="adm-note">No events yet.</p>'}
+      <h3 style="font-size:13px;margin:16px 0 10px">Customer &amp; delivery address</h3>
       <table class="adm-kv"><tbody>
-        <tr><td>Name</td><td>${esc((o.customer && o.customer.name) || '—')}</td></tr>
-        <tr><td>City / PIN</td><td>${esc((o.customer && o.customer.city) || '—')} ${esc((o.customer && o.customer.pin) || '')}</td></tr>
-        <tr><td>State</td><td>${esc((o.customer && o.customer.state) || '—')}</td></tr>
-        <tr><td>WhatsApp opted in</td><td>${o.whatsapp ? 'Yes' : 'No'}</td></tr>
+        <tr><td>Name</td><td>${esc(customerOf(o))}</td></tr>
+        <tr><td>E-mail</td><td>${esc(o.customerEmail || '—')}</td></tr>
+        <tr><td>Phone</td><td>${esc(o.customerPhone || a.phone || '—')}</td></tr>
+        <tr><td>Address</td><td>${esc([a.addressLine1, a.addressLine2, a.city, a.state, a.zipCode].filter(Boolean).join(', ') || '—')}</td></tr>
       </tbody></table>
     </div>
     <div>
       <h3 style="font-size:13px;margin-bottom:10px">Items</h3>
       <table class="adm-kv"><tbody>
-        ${(o.items || []).map(i => `<tr><td>${esc(i.name)} × ${i.qty}</td><td>${money(i.price * i.qty)}</td></tr>`).join('') || '<tr><td>—</td><td>—</td></tr>'}
-        <tr><td>Shipping</td><td>${money(o.ship || 0)}</td></tr>
-        <tr><td>Taxable value</td><td>${money(gst.taxable)}</td></tr>
-        <tr><td>${gst.intra ? 'CGST + SGST' : 'IGST'} @ ${(gst.rate * 100).toFixed(1)}%</td><td>${money(gst.tax)}</td></tr>
-        <tr><td>HSN</td><td>${esc(hsnFor((o.items || [])[0] || {}))}</td></tr>
+        ${(o.items || []).map(i => `<tr><td>${esc(i.title)} × ${i.quantity}<br><span class="pill">${esc(i.sku || '')}</span></td><td>${money(i.price * i.quantity)}</td></tr>`).join('') || '<tr><td>—</td><td>—</td></tr>'}
+        <tr><td>Subtotal</td><td>${money(o.subtotal)}</td></tr>
+        ${o.discountAmount ? `<tr><td>Discount ${o.discountCode ? '(' + esc(o.discountCode) + ')' : ''}</td><td>− ${money(o.discountAmount)}</td></tr>` : ''}
+        <tr><td>Shipping</td><td>${o.shippingCost ? money(o.shippingCost) : 'Free'}</td></tr>
+        <tr><td><b>Total paid</b></td><td><b>${money(o.totalAmount)}</b></td></tr>
+        <tr><td>Razorpay order</td><td><span class="adm-url">${esc(o.razorpayOrderId || '—')}</span></td></tr>
       </tbody></table>
-      <h3 style="font-size:13px;margin:16px 0 10px">Fulfilment</h3>
-      <div class="f-grid">${fld('omAwb', 'AWB / tracking', o.awb || '', 'text')}${fld('omCourier', 'Courier', o.courier || '', 'text')}</div>
-      <p class="adm-note">Changing the AWB writes it to the order and to the WhatsApp tracking template.</p>
+      ${stages.length ? `
+      <h3 style="font-size:13px;margin:16px 0 10px">Update this order</h3>
+      <div class="f-grid">
+        ${sel('omStatus', 'Move to', stages.map(s => [s, ORDER_LABEL[s]]), preselect || stages[0], true)}
+        ${fld('omCourier', 'Courier', o.courierName || '', 'text')}
+        ${fld('omAwb', 'AWB / tracking number', o.awbNumber || o.trackingNumber || '', 'text')}
+        ${fld('omUrl', 'Tracking link (https://…)', o.trackingUrl || '', 'text', true)}
+        ${fld('omNote', 'Message shown to the customer (optional)', '', 'text', true)}
+      </div>
+      <p class="adm-note">Shipped / In transit need an AWB number. Saving e-mails the customer.</p>` : `<p class="adm-note" style="margin-top:14px">This order is ${esc(ORDER_LABEL[o.status] || o.status)} and can no longer be changed.</p>`}
     </div>
   </div>
   <div class="adm-row-actions" style="margin-top:14px">
-    <button class="adm-btn" id="omInv">Open invoice</button>
-    <button class="adm-btn" id="omWa">Send WhatsApp update</button>
-    <button class="adm-btn" id="omRto">Mark RTO</button>
+    ${isPaidOrder(o) ? '<button class="adm-btn" id="omInv">Download invoice</button>' : ''}
+    ${o.customerEmail ? `<a class="adm-btn" href="mailto:${esc(o.customerEmail)}?subject=${encodeURIComponent('Your Amour Jewels order ' + (o.orderNumber || ''))}">E-mail customer</a>` : ''}
   </div>`;
-  const bg = openModal('Manage order ' + o.id, body, 'Save AWB', box => {
-    const orders = getOrders();
-    const t = orders.find(x => x.id === o.id);
-    if (t) { t.awb = gv(box, 'omAwb'); t.courier = gv(box, 'omCourier'); saveOrders(orders); }
-    audit('AWB updated for ' + o.id + ' (' + gv(box, 'omAwb') + ')');
-    toast('Tracking updated — WhatsApp template refreshed');
-    renderOrders(el);
-    return true;
-  });
-  bg.querySelector('#omInv').addEventListener('click', () => window.open('invoice.html?order=' + o.id, '_blank'));
-  bg.querySelector('#omWa').addEventListener('click', () => {
-    const tpl = notifyStage(o, o.status) || 'order_update';
-    toast('WhatsApp "' + tpl + '" sent to ' + ((o.customer && o.customer.name) || 'customer'));
-  });
-  bg.querySelector('#omRto').addEventListener('click', () => {
-    const orders = getOrders();
-    const t = orders.find(x => x.id === o.id);
-    if (t) { t.status = 'RTO'; saveOrders(orders); }
-    audit('RTO flagged: ' + o.id);
-    toast(o.id + ' flagged RTO — refund queue updated');
-    bg.remove();
-    renderOrders(el);
-  });
+  const bg = openModal('Manage order ' + esc(o.orderNumber || o.id), body, stages.length ? 'Save &amp; notify customer' : null,
+    stages.length ? async box => {
+      const status = gv(box, 'omStatus');
+      if (status === 'CANCELLED' && !confirmBox('Cancel this order? Stock goes back on the shelf and the customer is e-mailed.' +
+        (isPaidOrder(o) ? '\n\nThis order is PAID — remember to refund the customer in Razorpay.' : ''))) return false;
+      await api('/api/admin/orders/' + encodeURIComponent(o.id) + '/stage', { method: 'PATCH', body: {
+        status, courier: gv(box, 'omCourier'), trackingNumber: gv(box, 'omAwb'), trackingUrl: gv(box, 'omUrl'), note: gv(box, 'omNote') } });
+      toast((o.orderNumber || 'Order') + ' → ' + ORDER_LABEL[status] + ' — customer e-mailed');
+      renderOrders(el);
+      return true;
+    } : null);
+  const inv = bg.querySelector('#omInv');
+  if (inv) inv.addEventListener('click', () => openBlob('/api/orders/' + encodeURIComponent(o.id) + '/invoice'));
 }
+
 /* ============================================================
-   CUSTOMERS — segments, lifetime value, order history
+   PRODUCTS
    ============================================================ */
-function renderCustomers(el) {
-  seedOrdersIfEmpty();
-  const orders = getOrders();
-  const f = el.dataset.f || 'All';
+const productImg = p => (p.imageUrls && p.imageUrls[0]) || '';
+const thumb = p => productImg(p)
+  ? `<img class="adm-thumb" src="${esc(productImg(p))}" alt="${esc(p.title)}" loading="lazy">`
+  : '<span class="adm-thumb" style="display:inline-block;background:var(--linen)"></span>';
+
+async function renderProducts(el, fromCache) {
+  if (!fromCache) loading(el);
+  let catalog;
+  try { catalog = await allProducts(!fromCache); } catch (e) { if (e.status !== 401) failBox(el, e, () => renderProducts(el)); return; }
   const q = (el.dataset.q || '').toLowerCase();
-  const seg = c => c.orders > 2 ? 'VIP' : c.orders > 1 ? 'Returning' : 'New';
-  const rows = DEMO_CUSTOMERS.map(c => {
-    const live = orders.filter(o => (o.customer && o.customer.name) === c.name);
-    const liveVal = live.reduce((a, o) => a + (o.sub || 0), 0);
-    const total = c.orders + live.length;
-    return Object.assign({}, c, { orders: total, spent: c.spent + liveVal, liveCount: live.length, aov: (c.spent + liveVal) / total });
-  })
-    .filter(c => f === 'All' || (f === 'VIP' ? c.orders > 2 : f === 'Returning' ? c.orders > 1 && c.orders <= 2 : c.orders === 1))
-    .filter(c => !q || c.name.toLowerCase().includes(q) || c.email.toLowerCase().includes(q) || c.city.toLowerCase().includes(q));
+  const rows = catalog.filter(p => !q || (p.title || '').toLowerCase().includes(q) || (p.sku || '').toLowerCase().includes(q) || (p.category || '').toLowerCase().includes(q));
   el.innerHTML = `
-  <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(165px,1fr))">
-    ${kpi('Total customers', (DEMO_CUSTOMERS.length + 2179).toLocaleString('en-IN'), '▲ 9% this month')}
-    ${kpi('New', DEMO_CUSTOMERS.filter(c => c.orders === 1).length, 'first order')}
-    ${kpi('Returning', DEMO_CUSTOMERS.filter(c => c.orders > 1).length, '2+ orders')}
-    ${kpi('VIP', DEMO_CUSTOMERS.filter(c => c.orders > 2).length, '3+ orders · priority line')}
-    ${kpi('Avg LTV', money(rows.reduce((a, c) => a + c.spent, 0) / (rows.length || 1)), 'per tracked customer')}
-  </div>
+  <div class="adm-alert">Products marked <b>Live</b> appear on the storefront straight away. The storefront reads them from Redis, and every save here updates Redis at the same moment. <b>Hide</b> keeps the product (and old orders) but removes it from the shop.</div>
   <div class="adm-toolbar">
     <div class="adm-searchbar"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
-      <input id="cuQ" placeholder="Search name, email or city…" value="${esc(el.dataset.q || '')}"></div>
-    <select id="cuF">${['All', 'New', 'Returning', 'VIP'].map(s => `<option ${f === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
-    <span class="pill">${rows.length} shown</span>
+      <input id="pQ" placeholder="Search name, SKU or category…" value="${esc(el.dataset.q || '')}"></div>
+    <span class="pill">${rows.length} of ${catalog.length} products</span>
+    <button class="adm-btn dark" id="pAdd">+ Add product</button>
   </div>
-  ${rows.length ? tbl(['Customer', 'City', 'Orders', 'Spend', 'AOV', 'Segment', 'Channel', 'Last order', 'Actions'], rows.map(c => `<tr>
-    <td><b>${esc(c.name)}</b><br><span class="pill">${esc(c.email)} · ${esc(c.phone)}</span></td>
-    <td>${esc(c.city)}<br><span class="pill">${esc(c.state)}</span></td>
-    <td>${c.orders}${c.liveCount ? ` <span class="pill">(+${c.liveCount} live)</span>` : ''}</td>
-    <td>${money(c.spent)}</td>
-    <td>${money(c.aov)}</td>
-    <td>${seg(c) === 'VIP' ? chip('VIP', 'ok') : seg(c) === 'Returning' ? chip('Returning', 'info') : chip('New', 'warn')}</td>
-    <td>${esc(c.channel)} ${c.wa ? chip('WA', 'ok') : ''}</td>
-    <td>${dshort(c.last)}</td>
+  ${tbl(['Product', 'SKU', 'Price', 'Stock', 'Category', 'Featured', 'Status', 'Actions'], rows.length ? rows.map(p => `<tr>
+    <td><div class="adm-prod">${thumb(p)}<div><b>${esc(p.title)}</b></div></div></td>
+    <td>${esc(p.sku || '—')}</td>
+    <td>${money(p.price)}${p.compareAtPrice > p.price ? `<br><span class="pill">MRP ${money(p.compareAtPrice)}</span>` : ''}</td>
+    <td>${chip(p.stockQuantity + ' pcs', p.stockQuantity <= 0 ? 'bad' : p.stockQuantity < 10 ? 'warn' : 'ok')}</td>
+    <td>${esc(p.category || '—')}</td>
+    <td>${p.featured ? chip('Yes', 'ok') : '—'}</td>
+    <td>${p.active ? chip('Live', 'ok') : chip('Hidden', 'warn')}</td>
     <td><div class="adm-row-actions">
-      <button class="adm-btn dark" data-cview="${esc(c.email)}">View</button>
-      <button class="adm-btn" data-cwa="${esc(c.email)}">WhatsApp</button>
-    </div></td></tr>`)) : '<p class="adm-note">No customers match this filter.</p>'}
-  <p class="adm-note">Profiles join live orders placed on this device with the demo cohort. Production keeps one profile per phone number across web, WhatsApp and store visits.</p>`;
-  const qi = el.querySelector('#cuQ');
-  qi.addEventListener('input', () => { el.dataset.q = qi.value; renderCustomers(el); qi.focus(); });
-  el.querySelector('#cuF').addEventListener('change', e => { el.dataset.f = e.target.value; renderCustomers(el); });
-  el.querySelectorAll('[data-cview]').forEach(b => b.addEventListener('click', () => customerModal(rows.find(c => c.email === b.dataset.cview), orders, el)));
-  el.querySelectorAll('[data-cwa]').forEach(b => b.addEventListener('click', () => {
-    const c = rows.find(x => x.email === b.dataset.cwa);
-    audit('WhatsApp opened for customer ' + c.name);
-    toast('WhatsApp chat opened with ' + c.name);
+      <button class="adm-btn" data-edit="${esc(p.id)}">Edit</button>
+      <button class="adm-btn" data-tog="${esc(p.id)}">${p.active ? 'Hide' : 'Show'}</button>
+    </div></td></tr>`) : ['<tr><td colspan="8"><p class="adm-note">No products match that search.</p></td></tr>'])}
+  <p class="adm-note">Stock shown is what customers can actually buy. A product with 0 stock stays visible but cannot be added to a cart.</p>`;
+  const qi = el.querySelector('#pQ');
+  qi.addEventListener('input', debounce(() => { el.dataset.q = qi.value; renderProducts(el, true).then(() => { const n = el.querySelector('#pQ'); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }); }, 250));
+  el.querySelector('#pAdd').addEventListener('click', () => productModal(null, el));
+  bindProductRows(el, catalog);
+}
+function bindProductRows(el, catalog) {
+  el.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => productModal(catalog.find(p => p.id === b.dataset.edit), el)));
+  el.querySelectorAll('[data-tog]').forEach(b => b.addEventListener('click', async () => {
+    const p = catalog.find(x => x.id === b.dataset.tog);
+    const done = await act(b, () => api('/api/admin/products/' + encodeURIComponent(p.id) + '/active', { method: 'PATCH', body: { active: !p.active } }),
+      p.title + (p.active ? ' hidden from the shop' : ' is live on the shop'));
+    if (done) renderProducts(el);
   }));
 }
 
-function customerModal(c, orders, el) {
-  if (!c) return;
-  const hist = orders.filter(o => (o.customer && o.customer.name) === c.name);
+function productModal(p, el) {
+  const known = Array.from(new Set((cache.products || []).map(x => x.category).filter(Boolean).concat(['Diamonds']))).sort();
+  const cat = p ? p.category : '';
+  const catOptions = known.map(c => [c, c]).concat([['__new', '+ New category…']]);
+  let images = (p && p.imageUrls ? p.imageUrls : []).slice();
   const body = `
-  <div class="adm-mini" style="margin-bottom:16px">
-    <div><span>Orders</span><b>${c.orders}</b></div>
-    <div><span>Lifetime value</span><b>${money(c.spent)}</b></div>
-    <div><span>AOV</span><b>${money(c.aov)}</b></div>
-    <div><span>Since</span><b>${dshort(c.first)}</b></div>
+  <div class="f-grid">
+    ${fld('pmName', 'Product name', p ? p.title : '', 'text', true)}
+    ${fld('pmSku', 'SKU (unique)', p ? p.sku : '', 'text', false, p ? 'readonly style="background:var(--linen)"' : '')}
+    ${fld('pmPrice', 'Selling price (₹)', p ? p.price : '', 'number', false, 'min="0" step="0.01"')}
+    ${fld('pmMrp', 'MRP / compare-at price (₹)', p ? p.compareAtPrice : '', 'number', false, 'min="0" step="0.01"')}
+    ${fld('pmStock', 'Stock (pcs)', p ? p.stockQuantity : 0, 'number', false, 'min="0" step="1"')}
+    ${sel('pmCat', 'Category', catOptions, known.includes(cat) ? cat : (cat ? '__new' : known[0]))}
+    <div class="field" id="pmNewCatWrap" style="display:none"><label>New category name</label><input id="pmNewCat" value="${esc(known.includes(cat) ? '' : cat || '')}" placeholder="e.g. Diamonds"></div>
+    ${sel('pmFeat', 'Featured on home page', [['false', 'No'], ['true', 'Yes']], p && p.featured ? 'true' : 'false')}
+    ${sel('pmActive', 'Visibility', [['true', 'Live on the shop'], ['false', 'Hidden']], !p || p.active ? 'true' : 'false')}
+    <div class="field full"><label>Description</label><input id="pmDesc" value="${esc(p ? p.description : '')}" maxlength="2000"></div>
+    <div class="field full"><label>Images (the first one is the main photo)</label>
+      <div id="pmImgs" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px"></div>
+      <div class="adm-row-actions"><button type="button" class="adm-btn" id="pmUpload">Upload photo</button>
+        <input type="file" id="pmFile" accept="image/jpeg,image/png,image/webp" hidden>
+        <input id="pmImgUrl" placeholder="…or paste an image link and press Add" style="flex:1;min-width:160px">
+        <button type="button" class="adm-btn" id="pmAddUrl">Add</button></div>
+    </div>
   </div>
-  <table class="adm-kv"><tbody>
-    <tr><td>Email</td><td>${esc(c.email)}</td></tr>
-    <tr><td>Phone</td><td>${esc(c.phone)}</td></tr>
-    <tr><td>Location</td><td>${esc(c.city)}, ${esc(c.state)}</td></tr>
-    <tr><td>Acquisition</td><td>${esc(c.channel)}</td></tr>
-    <tr><td>WhatsApp opt-in</td><td>${c.wa ? 'Yes — transactional + marketing' : 'No'}</td></tr>
-  </tbody></table>
-  <h3 style="font-size:13px;margin:18px 0 10px">Order history</h3>
-  ${hist.length ? tbl(['Order', 'Date', 'Items', 'Value', 'Status'], hist.map(o => tr([o.id, dshort(o.date), (o.items || []).length, money(o.sub), statusChip(o.status)]))) : '<p class="adm-note">No orders on this device for this customer — the demo cohort summary is above.</p>'}
-  <div class="f-grid" style="margin-top:16px">
-    <div class="field full"><label>Internal note (staff only)</label><input id="cuNote" placeholder="e.g. prefers gold-tone · kada size M · anniversary in Nov"></div>
-  </div>`;
-  openModal('Customer — ' + esc(c.name), body, 'Save note', bg => {
-    audit('Note added for ' + c.name);
-    toast('Note saved for ' + c.name);
-    renderCustomers(el);
+  <p class="adm-note">${p ? 'Saving updates the product in the database and in Redis immediately.' : 'A new product goes live on the shop as soon as you save (unless you hide it).'}</p>`;
+  const bg = openModal(p ? 'Edit product' : 'Add product', body, p ? 'Save changes' : 'Create product', async box => {
+    const title = gv(box, 'pmName'), sku = gv(box, 'pmSku');
+    if (!title) throw new Error('Product name is required');
+    if (!sku) throw new Error('SKU is required');
+    const price = num(gv(box, 'pmPrice'));
+    if (!(price > 0)) throw new Error('Enter a selling price above zero');
+    const category = gv(box, 'pmCat') === '__new' ? gv(box, 'pmNewCat') : gv(box, 'pmCat');
+    if (!category) throw new Error('Choose or type a category');
+    const mrp = num(gv(box, 'pmMrp'));
+    await api('/api/admin/products/save', { method: 'POST', body: {
+      sku, title, description: gv(box, 'pmDesc'), price, compareAtPrice: mrp > 0 ? mrp : price,
+      stockQuantity: Math.max(0, Math.floor(num(gv(box, 'pmStock')))), category, imageUrls: images,
+      attributes: p ? p.attributes : null, featured: gv(box, 'pmFeat') === 'true', active: gv(box, 'pmActive') === 'true' } });
+    toast(title + ' saved — live on the shop' + (gv(box, 'pmActive') === 'true' ? '' : ' (hidden)'));
+    cache.products = null;
+    renderProducts(el);
     return true;
   });
+  const catSel = bg.querySelector('#pmCat'), wrap = bg.querySelector('#pmNewCatWrap');
+  const syncCat = () => { wrap.style.display = catSel.value === '__new' ? '' : 'none'; };
+  catSel.addEventListener('change', syncCat); syncCat();
+  const drawImgs = () => {
+    bg.querySelector('#pmImgs').innerHTML = images.length ? images.map((u, i) =>
+      `<span style="position:relative"><img class="adm-thumb" style="width:64px;height:64px" src="${esc(u)}" alt=""><button type="button" data-rm="${i}" title="Remove" style="position:absolute;top:-6px;right:-6px;background:var(--espresso);color:#fff;border-radius:50%;width:18px;height:18px;line-height:16px;font-size:12px">×</button></span>`).join('')
+      : '<span class="adm-note">No photos yet.</span>';
+    bg.querySelectorAll('[data-rm]').forEach(b => b.addEventListener('click', () => { images.splice(+b.dataset.rm, 1); drawImgs(); }));
+  };
+  drawImgs();
+  const file = bg.querySelector('#pmFile');
+  bg.querySelector('#pmUpload').addEventListener('click', () => file.click());
+  file.addEventListener('change', async () => {
+    if (!file.files[0]) return;
+    const fd = new FormData(); fd.append('file', file.files[0]);
+    const btn = bg.querySelector('#pmUpload'); btn.disabled = true; btn.textContent = 'Uploading…';
+    try { const r = await api('/api/admin/products/upload-image', { method: 'POST', form: fd }); images.push(r.imageUrl); drawImgs(); }
+    catch (e) { bg.showError(e.message); }
+    finally { btn.disabled = false; btn.textContent = 'Upload photo'; file.value = ''; }
+  });
+  bg.querySelector('#pmAddUrl').addEventListener('click', () => {
+    const u = gv(bg, 'pmImgUrl');
+    if (!/^https:\/\//i.test(u)) { bg.showError('Image links must start with https://'); return; }
+    images.push(u); bg.querySelector('#pmImgUrl').value = ''; drawImgs();
+  });
 }
+
 /* ============================================================
-   REVIEWS — moderation, replies, ratings feed schema
+   CATEGORIES (derived from products)
    ============================================================ */
-function renderReviews(el) {
-  const revs = getContent().reviews;
+async function renderCategories(el) {
+  loading(el);
+  let catalog;
+  try { catalog = await allProducts(true); } catch (e) { if (e.status !== 401) failBox(el, e, () => renderCategories(el)); return; }
+  const map = {};
+  catalog.forEach(p => {
+    const c = p.category || 'Uncategorised';
+    map[c] = map[c] || { name: c, total: 0, live: 0, stock: 0 };
+    map[c].total++; if (p.active) map[c].live++; map[c].stock += p.stockQuantity || 0;
+  });
+  const cats = Object.values(map).sort((a, b) => a.name.localeCompare(b.name));
+  el.innerHTML = `
+  <div class="adm-alert">Categories come from the products themselves — there is nothing separate to maintain. To create a new one (for example <b>Diamonds</b>), add or edit a product and choose <b>+ New category…</b>. It appears in the shop filters as soon as one live product uses it.</div>
+  <div class="adm-toolbar"><span class="pill">${cats.length} categories</span></div>
+  ${cats.length ? tbl(['Category', 'Products', 'Live on shop', 'Units in stock', 'Shop filter'], cats.map(c => tr([
+    '<b>' + esc(c.name) + '</b>', c.total, c.live ? chip(c.live + ' live', 'ok') : chip('none live', 'warn'), c.stock,
+    '<span class="adm-url">?category=' + esc(c.name) + '</span>']))) : '<p class="adm-note">No products yet.</p>'}`;
+}
+
+/* ============================================================
+   INVENTORY
+   ============================================================ */
+async function renderInventory(el) {
+  loading(el);
+  let catalog;
+  try { catalog = await allProducts(true); } catch (e) { if (e.status !== 401) failBox(el, e, () => renderInventory(el)); return; }
+  const rows = catalog.slice().sort((a, b) => a.stockQuantity - b.stockQuantity);
+  const low = rows.filter(r => r.stockQuantity > 0 && r.stockQuantity < 10);
+  const out = rows.filter(r => r.stockQuantity <= 0);
+  const value = rows.reduce((a, r) => a + Math.max(0, r.stockQuantity) * r.price, 0);
+  el.innerHTML = `
+  <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(165px,1fr))">
+    ${kpi('Products tracked', rows.length, 'all categories')}
+    ${kpi('Low stock (&lt;10)', low.length, low.length ? 'restock soon' : 'all healthy', low.length > 0)}
+    ${kpi('Out of stock', out.length, out.length ? 'cannot be bought' : 'none', out.length > 0)}
+    ${kpi('Stock value', moneyK(value), 'at selling price')}
+  </div>
+  ${low.length || out.length ? `<div class="adm-alert warn"><span>⚠️</span><div><b>${low.length + out.length} product${low.length + out.length === 1 ? '' : 's'} need attention.</b> They are sorted to the top.</div></div>` : ''}
+  ${rows.length ? tbl(['Product', 'SKU', 'On hand', 'Unit price', 'Stock value', 'Status', 'Actions'], rows.map(r => `<tr>
+    <td><div class="adm-prod">${thumb(r)}<div><b>${esc(r.title)}</b><br><span class="pill">${esc(r.category || '')}</span></div></div></td>
+    <td>${esc(r.sku || '—')}</td>
+    <td><b>${r.stockQuantity}</b> pcs</td>
+    <td>${money(r.price)}</td>
+    <td>${moneyK(Math.max(0, r.stockQuantity) * r.price)}</td>
+    <td>${r.stockQuantity <= 0 ? chip('Out of stock', 'bad') : r.stockQuantity < 10 ? chip('Low', 'warn') : chip('In stock', 'ok')}</td>
+    <td><div class="adm-row-actions"><button class="adm-btn dark" data-restock="${esc(r.id)}">Add stock</button></div></td></tr>`)) : '<p class="adm-note">No products yet.</p>'}
+  <p class="adm-note">"Add stock" adds to the current number safely, even while customers are buying. To correct a wrong count, edit the product.</p>`;
+  el.querySelectorAll('[data-restock]').forEach(b => b.addEventListener('click', () => {
+    const p = catalog.find(x => x.id === b.dataset.restock);
+    openModal('Add stock — ' + esc(p.title), `<div class="f-grid">${fld('rsQty', 'Units received', 10, 'number', false, 'min="1" step="1"')}</div>
+      <p class="adm-note">Currently ${p.stockQuantity} pcs on hand.</p>`, 'Add to stock', async bg => {
+      const qty = Math.floor(num(gv(bg, 'rsQty')));
+      if (qty < 1) throw new Error('Enter at least 1 unit');
+      await api('/api/admin/products/' + encodeURIComponent(p.id) + '/restock', { method: 'POST', body: { quantity: qty } });
+      toast('+' + qty + ' pcs added to ' + p.title);
+      cache.products = null;
+      renderInventory(el);
+      return true;
+    });
+  }));
+}
+
+/* ============================================================
+   CUSTOMERS
+   ============================================================ */
+async function renderCustomers(el) {
+  const page = +(el.dataset.page || 0);
+  const q = el.dataset.q || '';
+  if (!el.dataset.ready) loading(el);
+  let data;
+  try { data = await api('/api/admin/customers?page=' + page + '&size=25' + (q ? '&q=' + encodeURIComponent(q) : '')); }
+  catch (e) { if (e.status !== 401) failBox(el, e, () => renderCustomers(el)); return; }
+  el.dataset.ready = '1';
+  const rows = data.items || [];
+  const total = data.total || 0;
+  const pages = Math.max(1, Math.ceil(total / 25));
+  el.innerHTML = `
+  <div class="adm-toolbar">
+    <div class="adm-searchbar"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <input id="cuQ" placeholder="Search name, e-mail or phone…" value="${esc(q)}"></div>
+    <span class="pill">${total} customer${total === 1 ? '' : 's'}</span>
+  </div>
+  ${rows.length ? tbl(['Customer', 'Phone', 'Verified', 'Sign-in', 'Marketing', 'Status', 'Joined', 'Actions'], rows.map((c, i) => `<tr>
+    <td><b>${esc(c.name || '—')}</b><br><span class="pill">${esc(c.email || '')}</span></td>
+    <td>${esc(c.phone || '—')}</td>
+    <td>${c.emailVerified ? chip('E-mail', 'ok') : chip('E-mail', 'warn')} ${c.phoneVerified ? chip('Phone', 'ok') : ''}</td>
+    <td>${esc((c.signInMethods || []).join(', ') || '—')}</td>
+    <td>${c.marketingConsent ? chip('Opted in', 'ok') : '—'}</td>
+    <td>${c.active ? chip('Active', 'ok') : chip('Disabled', 'bad')}</td>
+    <td>${dshort(c.joinedAt)}</td>
+    <td><div class="adm-row-actions"><button class="adm-btn dark" data-cview="${i}">View</button></div></td></tr>`)) : '<p class="adm-note">No customers match.</p>'}
+  <div class="adm-toolbar" style="margin-top:12px">
+    <button class="adm-btn" id="cuPrev" ${page <= 0 ? 'disabled' : ''}>← Newer</button>
+    <span class="pill">Page ${page + 1} of ${pages}</span>
+    <button class="adm-btn" id="cuNext" ${page + 1 >= pages ? 'disabled' : ''}>Older →</button>
+  </div>`;
+  const qi = el.querySelector('#cuQ');
+  qi.addEventListener('input', debounce(() => { el.dataset.q = qi.value; el.dataset.page = 0; renderCustomers(el).then(() => { const n = el.querySelector('#cuQ'); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }); }, 350));
+  el.querySelector('#cuPrev').addEventListener('click', () => { el.dataset.page = page - 1; renderCustomers(el); });
+  el.querySelector('#cuNext').addEventListener('click', () => { el.dataset.page = page + 1; renderCustomers(el); });
+  el.querySelectorAll('[data-cview]').forEach(b => b.addEventListener('click', () => customerModal(rows[+b.dataset.cview])));
+}
+async function customerModal(c) {
+  let hist = [];
+  try { hist = (await recentOrders()).filter(o => (o.customerEmail || '').toLowerCase() === (c.email || '').toLowerCase()); } catch (e) {}
+  const spent = hist.filter(isPaidOrder).reduce((a, o) => a + (o.totalAmount || 0), 0);
+  openModal('Customer — ' + esc(c.name || c.email), `
+  <div class="adm-mini" style="margin-bottom:16px">
+    <div><span>Orders</span><b>${hist.length}</b></div>
+    <div><span>Spent</span><b>${money(spent)}</b></div>
+    <div><span>Since</span><b>${dshort(c.joinedAt)}</b></div>
+  </div>
+  <table class="adm-kv"><tbody>
+    <tr><td>E-mail</td><td>${esc(c.email || '—')} ${c.emailVerified ? chip('verified', 'ok') : chip('not verified', 'warn')}</td></tr>
+    <tr><td>Phone</td><td>${esc(c.phone || '—')} ${c.phoneVerified ? chip('verified', 'ok') : ''}</td></tr>
+    <tr><td>Sign-in methods</td><td>${esc((c.signInMethods || []).join(', ') || '—')}</td></tr>
+    <tr><td>Marketing e-mails</td><td>${c.marketingConsent ? 'Opted in' : 'No'}</td></tr>
+  </tbody></table>
+  <h3 style="font-size:13px;margin:18px 0 10px">Orders <span class="pill">from the latest 100 orders</span></h3>
+  ${hist.length ? tbl(['Order', 'Date', 'Value', 'Status'], hist.map(o => tr([esc(o.orderNumber || o.id), dshort(o.createdAt), money(o.totalAmount), statusChip(o.status)]))) : '<p class="adm-note">No recent orders for this customer.</p>'}
+  ${c.email ? `<div class="adm-row-actions" style="margin-top:14px"><a class="adm-btn" href="mailto:${esc(c.email)}">E-mail customer</a></div>` : ''}`, null);
+}
+
+/* ============================================================
+   REVIEWS
+   ============================================================ */
+async function renderReviews(el) {
+  loading(el);
+  let revs, names = {};
+  try {
+    revs = await api('/api/feedback/admin/store/all');
+    try { (await allProducts()).forEach(p => { names[p.id] = p.title; }); } catch (e) {}
+  } catch (e) { if (e.status !== 401) failBox(el, e, () => renderReviews(el)); return; }
+  revs = (Array.isArray(revs) ? revs : []).slice().sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
   const f = el.dataset.f || 'All';
-  const list = revs.filter(r => f === 'All' || r.status === f);
-  const avg = revs.reduce((a, r) => a + r.rating, 0) / (revs.length || 1);
+  const list = revs.filter(r => f === 'All' || (f === 'Low' ? r.rating <= 2 : f === 'Store' ? !r.productId : !!r.productId));
+  const avg = revs.reduce((a, r) => a + (r.rating || 0), 0) / (revs.length || 1);
   const buckets = [5, 4, 3, 2, 1].map(n => ({ n, c: revs.filter(r => r.rating === n).length }));
-  const persist = l => { saveContent({ reviews: l }); renderReviews(el); };
   el.innerHTML = `
   <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
-    ${kpi('Total reviews', revs.length, 'all products')}
-    ${kpi('Average rating', avg.toFixed(1) + ' ★', avg >= 4.5 ? 'schema-eligible' : 'below 4.5')}
-    ${kpi('Pending moderation', revs.filter(r => r.status === 'Pending').length, 'approve to publish', revs.filter(r => r.status === 'Pending').length > 0)}
-    ${kpi('Approved &amp; live', revs.filter(r => r.status === 'Approved').length, 'rendering on PDPs')}
-    ${kpi('Hidden', revs.filter(r => r.status === 'Hidden').length, 'spam / policy')}
+    ${kpi('Total reviews', revs.length, 'products + store')}
+    ${kpi('Average rating', revs.length ? avg.toFixed(1) + ' ★' : '—', avg >= 4.5 ? 'excellent' : '')}
+    ${kpi('Low (1–2★)', revs.filter(r => r.rating <= 2).length, 'worth a look', revs.filter(r => r.rating <= 2).length > 0)}
+    ${kpi('Store feedback', revs.filter(r => !r.productId).length, 'not tied to a product')}
   </div>
-  <div class="adm-alert"><span>⭐</span><div><b>Approved reviews render on the product page and feed the Product schema <span class="adm-url">aggregateRating</span></b> — Google shows stars in search results. Verified badges come from matched order records.</div></div>
+  <div class="adm-alert"><span>⭐</span><div>Reviews go live on the product page as soon as a signed-in customer posts them. Use <b>Delete</b> to remove spam or abuse.</div></div>
   <div class="adm-grid-2" style="margin-bottom:14px">
     <div class="adm-card"><h3>Rating distribution</h3>
       ${buckets.map(b => `<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><span class="pill" style="min-width:34px">${b.n} ★</span><div class="progress" style="flex:1"><i style="width:${pct(b.c, revs.length)}%"></i></div><span class="pill">${b.c}</span></div>`).join('')}
     </div>
-    <div class="adm-card"><h3>Moderation policy</h3>
-      <table class="adm-kv"><tbody>
-        <tr><td>Auto-approve</td><td>4★+ with verified purchase</td></tr>
-        <tr><td>Manual queue</td><td>1–3★ or unverified</td></tr>
-        <tr><td>Auto-block</td><td>Links, phone numbers, competitor mentions</td></tr>
-        <tr><td>Reply SLA</td><td>24 hrs · signed by the atelier</td></tr>
-      </tbody></table>
-    </div>
   </div>
   <div class="adm-toolbar">
-    <select id="rF">${['All', 'Pending', 'Approved', 'Hidden'].map(s => `<option ${f === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+    <select id="rF">${['All', 'Low', 'Store'].map(s => `<option value="${s}" ${f === s ? 'selected' : ''}>${s === 'All' ? 'All reviews' : s === 'Low' ? 'Low ratings (1–2★)' : 'Store feedback'}</option>`).join('')}</select>
     <span class="pill">${list.length} shown</span>
-    <button class="adm-btn dark" id="rReq">Send review requests (D+3)</button>
   </div>
-  ${list.length ? tbl(['Product', 'Customer', 'Rating', 'Review', 'Date', 'Verified', 'Helpful', 'Status', 'Actions'], list.map(r => {
-    const i = revs.indexOf(r);
-    return `<tr>
-      <td>${esc(r.product)}</td>
-      <td>${esc(r.name)}</td>
-      <td>${stars(r.rating)}</td>
-      <td style="max-width:300px">${esc(r.text)}</td>
-      <td>${dshort(r.date)}</td>
-      <td>${r.verified ? chip('Verified', 'ok') : chip('Unverified', 'warn')}</td>
-      <td>${r.helpful}</td>
-      <td>${chip(r.status, r.status === 'Approved' ? 'ok' : r.status === 'Hidden' ? 'bad' : 'warn')}</td>
-      <td><div class="adm-row-actions">
-        ${r.status !== 'Approved' ? `<button class="adm-btn dark" data-appr="${i}">Approve</button>` : ''}
-        ${r.status !== 'Hidden' ? `<button class="adm-btn" data-hide="${i}">Hide</button>` : ''}
-        <button class="adm-btn" data-reply="${i}">Reply</button>
-        <button class="adm-btn" data-delr="${i}">Delete</button>
-      </div></td></tr>`;
-  })) : '<p class="adm-note">Nothing in this queue.</p>'}
-  <p class="adm-note">Review requests go out automatically 3 days after delivery over WhatsApp and e-mail — the template is <span class="adm-url">review_request</span>.</p>`;
+  ${list.length ? tbl(['Product', 'Customer', 'Rating', 'Review', 'Date', 'Actions'], list.map(r => tr([
+    esc(r.productId ? (names[r.productId] || r.productId) : 'Store feedback'), esc(r.userName || 'Customer'), stars(r.rating || 0),
+    '<span style="display:block;max-width:320px">' + esc(r.comment || '') + '</span>', dshort(r.createdAt),
+    `<div class="adm-row-actions"><button class="adm-btn" data-delr="${esc(r.id)}">Delete</button></div>`]))) : '<p class="adm-note">No reviews yet.</p>'}`;
   el.querySelector('#rF').addEventListener('change', e => { el.dataset.f = e.target.value; renderReviews(el); });
-  el.querySelector('#rReq').addEventListener('click', () => {
-    audit('Review requests queued for delivered orders');
-    toast('Review requests queued — delivered orders in the last 7 days');
-  });
-  el.querySelectorAll('[data-appr]').forEach(b => b.addEventListener('click', () => {
-    const l = revs.slice(); l[+b.dataset.appr].status = 'Approved';
-    audit('Review approved: ' + l[+b.dataset.appr].product);
-    persist(l); toast('Review approved — live on the product page');
-  }));
-  el.querySelectorAll('[data-hide]').forEach(b => b.addEventListener('click', () => {
-    const l = revs.slice(); l[+b.dataset.hide].status = 'Hidden';
-    audit('Review hidden: ' + l[+b.dataset.hide].product);
-    persist(l); toast('Review hidden');
-  }));
-  el.querySelectorAll('[data-reply]').forEach(b => b.addEventListener('click', () => {
-    const r = revs[+b.dataset.reply];
-    openModal('Reply to ' + esc(r.name), `<div class="f-grid"><div class="field full"><label>Public reply</label><input id="rvText" value="Thank you for the kind words — the atelier team"></div></div><p class="adm-note">Replies appear under the review on the product page.</p>`, 'Post reply', bg => {
-      const l = revs.slice(); l[+b.dataset.reply].reply = gv(bg, 'rvText');
-      audit('Replied to review on ' + r.product);
-      persist(l); toast('Reply posted');
-      return true;
-    });
-  }));
-  el.querySelectorAll('[data-delr]').forEach(b => b.addEventListener('click', () => {
-    if (!confirm('Delete this review permanently?')) return;
-    const l = revs.slice(); l.splice(+b.dataset.delr, 1);
-    audit('Review deleted');
-    persist(l); toast('Review deleted');
+  el.querySelectorAll('[data-delr]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirmBox('Delete this review permanently?')) return;
+    const done = await act(b, () => api('/api/feedback/admin/reviews/' + encodeURIComponent(b.dataset.delr), { method: 'DELETE' }), 'Review deleted');
+    if (done) renderReviews(el);
   }));
 }
+
 /* ============================================================
-   RETURNS, EXCHANGES & RTO
+   RETURNS
    ============================================================ */
-function seedReturnsIfEmpty() {
-  if (getReturns().length) return;
-  saveReturns([
-    { orderId: 'AJ20260002', type: 'Exchange', reason: 'Kada size too large — need M', status: 'Approved', date: '2026-09-06', amount: 0, customer: 'Rhea Kapoor' },
-    { orderId: 'AJ20260004', type: 'Return', reason: 'Plating discoloured within 30 days', status: 'Pending', date: '2026-09-09', amount: 4850, customer: 'Sneha Kulkarni' },
-    { orderId: 'AJ20260005', type: 'Refund', reason: 'Order cancelled before dispatch', status: 'Refunded', date: '2026-09-03', amount: 3200, customer: 'Diya Patel' }
-  ]);
-}
-function renderReturns(el) {
-  seedOrdersIfEmpty();
-  seedReturnsIfEmpty();
-  const reqs = getReturns();
-  const orders = getOrders();
-  const rto = orders.filter(o => o.status === 'RTO' || o.status === 'Cancelled' || o.status === 'Return Requested');
-  const pending = reqs.filter(r => r.status === 'Pending');
-  const refunded = reqs.filter(r => r.status === 'Refunded');
+const RET_LABEL = { REQUESTED: 'Needs decision', APPROVED_PENDING_PICKUP: 'Approved — awaiting parcel', REJECTED: 'Rejected', ITEM_RECEIVED: 'Received — ready to refund', REFUNDED: 'Refunded' };
+const RET_CHIP = { REQUESTED: 'warn', APPROVED_PENDING_PICKUP: 'info', REJECTED: 'bad', ITEM_RECEIVED: 'info', REFUNDED: 'ok' };
+
+async function renderReturns(el) {
+  loading(el);
+  let data;
+  try { data = await api('/api/admin/returns?page=0&size=100'); } catch (e) { if (e.status !== 401) failBox(el, e, () => renderReturns(el)); return; }
+  const reqs = pageItems(data);
+  const by = s => reqs.filter(r => r.status === s);
+  const refunded = by('REFUNDED');
   el.innerHTML = `
   <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(165px,1fr))">
-    ${kpi('Open requests', pending.length, 'SLA 24 hrs to respond', pending.length > 0)}
-    ${kpi('Approved pickups', reqs.filter(r => r.status === 'Approved').length, 'reverse pickup booked')}
-    ${kpi('Refunded', refunded.length, moneyK(refunded.reduce((a, r) => a + (r.amount || 0), 0)) + ' returned')}
-    ${kpi('RTO / cancelled', rto.length, 'courier or customer')}
-    ${kpi('Return rate', pct(reqs.length, orders.length || 1) + '%', 'industry avg 8–12%')}
+    ${kpi('Need a decision', by('REQUESTED').length, 'reply within 24 hrs', by('REQUESTED').length > 0)}
+    ${kpi('Awaiting parcel', by('APPROVED_PENDING_PICKUP').length, 'approved, not received')}
+    ${kpi('Ready to refund', by('ITEM_RECEIVED').length, 'parcel checked', by('ITEM_RECEIVED').length > 0)}
+    ${kpi('Refunded', refunded.length, moneyK(refunded.reduce((a, r) => a + (r.refundAmount || 0), 0)) + ' returned')}
   </div>
-  <div class="adm-alert"><span>↩️</span><div><b>Policy:</b> 7-day exchange or return from delivery · jewellery must be unworn with the tag · refunds to source in 3–5 working days.</div></div>
-  ${pending.length ? `<div class="adm-card" style="margin-bottom:14px"><h3>Needs a decision</h3>
-    ${tbl(['Order', 'Customer', 'Type', 'Reason', 'Value', 'Raised', 'Actions'], pending.map(r => {
-      const i = reqs.indexOf(r);
-      return tr([r.orderId, esc(r.customer || '—'), chip(r.type, 'info'), esc(r.reason), money(r.amount || 0), dshort(r.date),
-        `<div class="adm-row-actions"><button class="adm-btn dark" data-appr="${i}">Approve pickup</button><button class="adm-btn" data-rej="${i}">Reject</button></div>`]);
-    }))}</div>` : ''}
-  <div class="adm-grid-2">
-    <div class="adm-card"><h3>All requests</h3>
-      ${reqs.length ? tbl(['Order', 'Type', 'Reason', 'Value', 'Date', 'Status', 'Actions'], reqs.map(r => {
-        const i = reqs.indexOf(r);
-        return tr([r.orderId, chip(r.type, 'info'), esc(r.reason), money(r.amount || 0), dshort(r.date),
-          chip(r.status, r.status === 'Refunded' ? 'ok' : r.status === 'Approved' ? 'info' : r.status === 'Rejected' ? 'bad' : 'warn'),
-          r.status === 'Refunded' ? '—' : '<div class="adm-row-actions"><button class="adm-btn dark" data-refund="' + i + '">Refund</button><button class="adm-btn" data-open="' + r.orderId + '">Invoice</button></div>']);
-      })) : '<p class="adm-note">No return or exchange requests.</p>'}
-      <p class="adm-note">Customers raise these from Track Order → Request return/exchange; they land here in real time.</p>
-    </div>
-    <div class="adm-card"><h3>RTO watchlist</h3>
-      ${rto.length ? rto.map(o => `<div style="display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--line-soft)"><span>${o.id} · ${esc((o.customer && o.customer.city) || '')}</span>${statusChip(o.status)}</div>`).join('') : '<p class="adm-note">No parcels in RTO or cancelled state.</p>'}
-      <table class="adm-kv" style="margin-top:12px"><tbody>
-        <tr><td>Failed attempts before RTO</td><td>7</td></tr>
-        <tr><td>Prepaid RTO refund</td><td>Auto · 48 hrs</td></tr>
-      </tbody></table>
-    </div>
-  </div>`;
-  const persist = l => { saveReturns(l); renderReturns(el); };
-  el.querySelectorAll('[data-appr]').forEach(b => b.addEventListener('click', () => {
-    const l = reqs.slice(); l[+b.dataset.appr].status = 'Approved';
-    audit('Return pickup approved: ' + l[+b.dataset.appr].orderId);
-    persist(l); toast('Pickup approved — courier + WhatsApp notified');
+  <div class="adm-alert"><span>↩️</span><div><b>How it works:</b> approve or reject → when the parcel arrives and passes your check, press <b>Mark received</b> → press <b>Refund</b>. The refund goes back to the customer's original payment through Razorpay for real. Reverse pickup is booked manually in Shiprocket for now.</div></div>
+  ${reqs.length ? tbl(['Return', 'Order', 'Customer', 'Item', 'Reason', 'Refund', 'Raised', 'Status', 'Actions'], reqs.map(r => {
+    let actions = '—';
+    if (r.status === 'REQUESTED') actions = `<div class="adm-row-actions"><button class="adm-btn dark" data-rev="${esc(r.returnNumber)}" data-ok="1">Approve</button><button class="adm-btn" data-rev="${esc(r.returnNumber)}" data-ok="0">Reject</button></div>`;
+    else if (r.status === 'APPROVED_PENDING_PICKUP') actions = `<div class="adm-row-actions"><button class="adm-btn dark" data-recv="${esc(r.returnNumber)}">Mark received</button></div>`;
+    else if (r.status === 'ITEM_RECEIVED') actions = `<div class="adm-row-actions"><button class="adm-btn dark" data-refund="${esc(r.returnNumber)}" data-amt="${r.refundAmount}">Refund ${money(r.refundAmount)}</button></div>`;
+    else if (r.status === 'REFUNDED') actions = `<span class="pill">${esc(r.refundTransactionId || '')}</span>`;
+    return `<tr>
+      <td><b>${esc(r.returnNumber)}</b></td>
+      <td>${esc(r.orderNumber)}</td>
+      <td>${esc(r.customerEmail || '—')}</td>
+      <td>${esc(r.sku || r.productId || '—')}</td>
+      <td style="max-width:260px">${esc(r.reason || '')}${r.description ? '<br><span class="pill">' + esc(r.description) + '</span>' : ''}${r.adminNotes ? '<br><span class="pill">Note: ' + esc(r.adminNotes) + '</span>' : ''}</td>
+      <td>${money(r.refundAmount)}</td>
+      <td>${dshort(r.createdAt)}</td>
+      <td>${chip(RET_LABEL[r.status] || r.status, RET_CHIP[r.status] || '')}</td>
+      <td>${actions}</td></tr>`;
+  })) : '<p class="adm-note">No return requests yet. Customers raise them from their order page within 7 days of delivery.</p>'}`;
+  el.querySelectorAll('[data-rev]').forEach(b => b.addEventListener('click', () => {
+    const ok = b.dataset.ok === '1';
+    openModal((ok ? 'Approve' : 'Reject') + ' return ' + esc(b.dataset.rev),
+      `<div class="f-grid">${fld('rtNote', ok ? 'Note for the record (optional)' : 'Reason for rejecting', '', 'text', true)}</div>`,
+      ok ? 'Approve return' : 'Reject return', async bg => {
+        if (!ok && !gv(bg, 'rtNote')) throw new Error('Please give a reason');
+        await api('/api/admin/returns/' + encodeURIComponent(b.dataset.rev) + '/review', { method: 'PATCH', body: { approved: ok, adminNotes: gv(bg, 'rtNote') } });
+        toast(ok ? 'Return approved' : 'Return rejected');
+        renderReturns(el);
+        return true;
+      });
   }));
-  el.querySelectorAll('[data-rej]').forEach(b => b.addEventListener('click', () => {
-    const l = reqs.slice(); l[+b.dataset.rej].status = 'Rejected';
-    audit('Return rejected: ' + l[+b.dataset.rej].orderId);
-    persist(l); toast('Request rejected — customer e-mailed the reason');
+  el.querySelectorAll('[data-recv]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirmBox('Confirm the parcel was received and passed your quality check?')) return;
+    const done = await act(b, () => api('/api/admin/returns/' + encodeURIComponent(b.dataset.recv) + '/received', { method: 'POST' }), 'Marked as received');
+    if (done) renderReturns(el);
   }));
-  el.querySelectorAll('[data-refund]').forEach(b => b.addEventListener('click', () => {
-    const l = reqs.slice(); l[+b.dataset.refund].status = 'Refunded';
-    audit('Refund issued: ' + l[+b.dataset.refund].orderId);
-    persist(l); toast('Refund initiated — 3–5 working days');
+  el.querySelectorAll('[data-refund]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirmBox('Refund ' + money(b.dataset.amt) + ' to the customer through Razorpay?\n\nThis moves real money and cannot be undone.')) return;
+    const done = await act(b, () => api('/api/admin/returns/' + encodeURIComponent(b.dataset.refund) + '/refund', { method: 'POST' }), 'Refund sent to the customer via Razorpay');
+    if (done) renderReturns(el);
   }));
-  el.querySelectorAll('[data-open]').forEach(b => b.addEventListener('click', () => window.open('invoice.html?order=' + b.dataset.open, '_blank')));
 }
-/* ============================================================
-   COUPONS & DISCOUNTS  (coupon = code; discount = rule)
-   ============================================================ */
-const COUPON_TYPE = { pct: 'Percent off', flat: 'Flat off', ship: 'Free shipping', giftcard: 'Gift card', referral: 'Referral' };
 
-function renderCoupons(el) {
-  const coupons = getCoupons();
-  const cards = getGiftCards();
+/* ============================================================
+   COUPONS
+   ============================================================ */
+const COUPON_TYPES = [['PERCENTAGE', 'Percent off'], ['FLAT', 'Flat ₹ off']];
+async function renderCoupons(el) {
+  loading(el);
+  let coupons;
+  try { coupons = await api('/api/coupons/admin/all'); } catch (e) { if (e.status !== 401) failBox(el, e, () => renderCoupons(el)); return; }
+  coupons = Array.isArray(coupons) ? coupons : [];
+  const expired = c => c.expiryDate && new Date(c.expiryDate) < new Date();
   el.innerHTML = `
   <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
-    ${kpi('Active codes', coupons.filter(c => c.active).length, coupons.length + ' total')}
-    ${kpi('First-order offer', '10%', 'code FIRST10 · auto-hinted at checkout')}
-    ${kpi('Referral codes', coupons.filter(c => c.type === 'referral').length, '10% to both sides')}
-    ${kpi('Gift cards issued', cards.length, moneyK(cards.reduce((a, g) => a + (g.balance || 0), 0)) + ' outstanding')}
+    ${kpi('Active codes', coupons.filter(c => c.active && !expired(c)).length, coupons.length + ' total')}
+    ${kpi('Times used', coupons.reduce((a, c) => a + (c.timesUsed || 0), 0), 'all codes')}
   </div>
   <div class="adm-toolbar">
-    <span class="pill">Percent · flat · free shipping · gift card · referral</span>
+    <span class="pill">Percent or flat ₹ · one code per order · checked on the server</span>
     <button class="adm-btn dark" id="cpAdd">+ New coupon</button>
-    <button class="adm-btn" id="cpGift">+ Issue gift card</button>
   </div>
-  ${tbl(['Code', 'Type', 'Value', 'Min order', 'Description', 'Status', 'Actions'], coupons.map(c => {
-    const i = coupons.indexOf(c);
-    return `<tr>
-      <td><b>${esc(c.code)}</b></td>
-      <td>${chip(COUPON_TYPE[c.type] || c.type, 'info')}</td>
-      <td>${c.type === 'pct' || c.type === 'referral' ? c.value + '%' : c.type === 'ship' ? 'Free' : money(c.value)}</td>
-      <td>${c.min ? money(c.min) : '—'}</td>
-      <td class="pill" style="max-width:280px">${esc(c.label)}</td>
-      <td>${chip(c.active ? 'Active' : 'Paused', c.active ? 'ok' : 'warn')}</td>
-      <td><div class="adm-row-actions">
-        <button class="adm-btn" data-ctog="${i}">${c.active ? 'Pause' : 'Activate'}</button>
-        <button class="adm-btn" data-ceditc="${i}">Edit</button>
-        <button class="adm-btn" data-cdelc="${i}">Delete</button>
-      </div></td></tr>`;
-  }))}
-  <div class="adm-grid-2">
-    ${giftCardSection(cards)}
-    ${couponRulesCard()}
-  </div>`;
+  ${coupons.length ? tbl(['Code', 'Type', 'Value', 'Min order', 'Expires', 'Used', 'Status', 'Actions'], coupons.map((c, i) => `<tr>
+    <td><b>${esc(c.code)}</b></td>
+    <td>${chip(c.discountType === 'FLAT' ? 'Flat off' : 'Percent off', 'info')}</td>
+    <td>${c.discountType === 'FLAT' ? money(c.discountValue) : c.discountValue + '%' + (c.maxDiscountAmount ? '<br><span class="pill">max ' + money(c.maxDiscountAmount) + '</span>' : '')}</td>
+    <td>${c.minOrderValue ? money(c.minOrderValue) : '—'}</td>
+    <td>${c.expiryDate ? dshort(c.expiryDate) + (expired(c) ? ' ' + chip('expired', 'bad') : '') : 'No expiry'}</td>
+    <td>${c.timesUsed || 0}${c.usageLimit > 0 ? ' / ' + c.usageLimit : ' <span class="pill">no cap</span>'}</td>
+    <td>${chip(c.active ? 'Active' : 'Paused', c.active ? 'ok' : 'warn')}</td>
+    <td><div class="adm-row-actions">
+      <button class="adm-btn" data-ctog="${i}">${c.active ? 'Pause' : 'Activate'}</button>
+      <button class="adm-btn" data-cedit="${i}">Edit</button>
+    </div></td></tr>`)) : '<p class="adm-note">No coupons yet. Create one with "+ New coupon".</p>'}
+  <p class="adm-note">Gift cards work at checkout by code, but they are created directly in the database for now — an issue screen is parked for a later update.</p>`;
   el.querySelector('#cpAdd').addEventListener('click', () => couponModal(null, el));
-  el.querySelector('#cpGift').addEventListener('click', () => giftCardModal(el));
-  el.querySelectorAll('[data-ctog]').forEach(b => b.addEventListener('click', () => {
-    const c = getCoupons()[+b.dataset.ctog];
-    const custom = readList(COUPONS_KEY).filter(x => x.code !== c.code);
-    custom.push(Object.assign({}, c, { active: !c.active }));
-    writeList(COUPONS_KEY, custom);
-    audit('Coupon ' + c.code + (c.active ? ' paused' : ' activated'));
-    toast(c.code + (c.active ? ' paused' : ' activated'));
-    renderCoupons(el);
+  el.querySelectorAll('[data-cedit]').forEach(b => b.addEventListener('click', () => couponModal(coupons[+b.dataset.cedit], el)));
+  el.querySelectorAll('[data-ctog]').forEach(b => b.addEventListener('click', async () => {
+    const c = coupons[+b.dataset.ctog];
+    const done = await act(b, () => c.active
+      ? api('/api/coupons/admin/' + encodeURIComponent(c.id), { method: 'DELETE' })
+      : api('/api/coupons/admin/create', { method: 'POST', body: Object.assign({}, c, { active: true }) }),
+      c.code + (c.active ? ' paused' : ' activated'));
+    if (done) renderCoupons(el);
   }));
-  el.querySelectorAll('[data-ceditc]').forEach(b => b.addEventListener('click', () => couponModal(getCoupons()[+b.dataset.ceditc], el)));
-  el.querySelectorAll('[data-cdelc]').forEach(b => b.addEventListener('click', () => {
-    const c = getCoupons()[+b.dataset.cdelc];
-    if (!confirm('Delete coupon ' + c.code + '?')) return;
-    writeList(COUPONS_KEY, readList(COUPONS_KEY).filter(x => x.code !== c.code));
-    audit('Coupon deleted: ' + c.code);
-    toast(c.code + ' deleted');
-    renderCoupons(el);
-  }));
-  el.querySelectorAll('[data-gadd]').forEach(b => b.addEventListener('click', () => {
-    const g = getGiftCards().find(x => x.code === b.dataset.gadd);
-    openModal('Add balance — ' + esc(g.code), `<div class="f-grid">${fld('gbAmt', 'Amount to add (₹)', 1000, 'number')}${fld('gbNote', 'Reference', 'Manual top-up')}</div>`, 'Add balance', bg => {
-      const add = +gv(bg, 'gbAmt') || 0;
-      saveGiftCards(getGiftCards().map(x => x.code === g.code ? Object.assign({}, x, { balance: x.balance + add, amount: x.amount + add }) : x));
-      audit('Gift card ' + g.code + ' topped up ' + money(add));
-      toast(g.code + ' balance now ' + money(g.balance + add));
-      renderCoupons(el);
-      return true;
-    });
-  }));
-  el.querySelectorAll('[data-gdel]').forEach(b => b.addEventListener('click', () => {
-    if (!confirm('Void gift card ' + b.dataset.gdel + '?')) return;
-    saveGiftCards(getGiftCards().filter(x => x.code !== b.dataset.gdel));
-    audit('Gift card voided: ' + b.dataset.gdel);
-    toast('Gift card voided');
-    renderCoupons(el);
-  }));
-}
-function giftCardSection(cards) {
-  return `<div class="adm-card"><h3>Gift cards issued</h3>
-    ${cards.length ? tbl(['Code', 'Issued', 'Balance', 'Recipient', 'Status', 'Actions'], cards.map(g => tr([
-      '<b>' + esc(g.code) + '</b>', money(g.amount), money(g.balance), esc(g.recipient || '—'),
-      chip(g.balance > 0 ? 'Live' : 'Redeemed', g.balance > 0 ? 'ok' : 'info'),
-      `<div class="adm-row-actions"><button class="adm-btn dark" data-gadd="${esc(g.code)}">Add balance</button><button class="adm-btn" data-gdel="${esc(g.code)}">Void</button></div>`
-    ]))) : '<p class="adm-note">No gift cards issued yet. "+ Issue gift card" creates one that is redeemable at checkout by code.</p>'}
-    <p class="adm-note">Balances are checked at checkout; partial redemption keeps the remaining balance live.</p>
-  </div>`;
-}
-function couponRulesCard() {
-  return `<div class="adm-card"><h3>Engine rules</h3>
-    <table class="adm-kv"><tbody>
-      <tr><td>One coupon per order</td><td>Yes</td></tr>
-      <tr><td>Stacks with tiered discounts</td><td>Prepaid only</td></tr>
-      <tr><td>Min-order check</td><td>Cart subtotal, pre-tax</td></tr>
-      <tr><td>Usage cap</td><td>1 per customer per code</td></tr>
-      <tr><td>Abandoned-cart codes</td><td>Auto-issued at 24 hrs</td></tr>
-    </tbody></table>
-    <p class="adm-note">The same engine powers the checkout coupon box — edits here are live immediately.</p>
-  </div>`;
 }
 function couponModal(c, el) {
   const body = `<div class="f-grid">
-    ${fld('cpCode', 'Coupon code', c ? c.code : 'DIWALI20', 'text', true)}
-    <div class="field"><label>Type</label><select id="cpType">${Object.keys(COUPON_TYPE).map(t => `<option value="${t}" ${c && c.type === t ? 'selected' : ''}>${COUPON_TYPE[t]}</option>`).join('')}</select></div>
-    ${fld('cpVal', 'Value (percent or ₹)', c ? c.value : 10, 'number')}
-    ${fld('cpMin', 'Minimum order (₹)', c ? c.min : 0, 'number')}
-    ${fld('cpLabel', 'Customer-facing description', c ? c.label : 'Festive offer — 20% off', 'text', true)}
-    <div class="field"><label>Status</label><select id="cpAct"><option value="1" ${!c || c.active ? 'selected' : ''}>Active</option><option value="0" ${c && !c.active ? 'selected' : ''}>Paused</option></select></div>
-  </div><p class="adm-note">Codes save to the coupon store and are valid at checkout immediately.</p>`;
-  openModal(c ? 'Edit coupon' : 'New coupon', body, 'Save coupon', bg => {
+    ${fld('cpCode', 'Coupon code', c ? c.code : '', 'text', false, c ? 'readonly style="background:var(--linen)"' : 'placeholder="DIWALI20"')}
+    ${sel('cpType', 'Type', COUPON_TYPES, c ? c.discountType : 'PERCENTAGE')}
+    ${fld('cpVal', 'Value (percent, or ₹ for flat)', c ? c.discountValue : 10, 'number', false, 'min="0" step="0.01"')}
+    ${fld('cpMax', 'Max discount ₹ (percent codes, optional)', c && c.maxDiscountAmount ? c.maxDiscountAmount : '', 'number', false, 'min="0"')}
+    ${fld('cpMin', 'Minimum order (₹)', c ? c.minOrderValue : 0, 'number', false, 'min="0"')}
+    ${fld('cpUse', 'Total uses allowed (0 = unlimited)', c ? c.usageLimit : 0, 'number', false, 'min="0" step="1"')}
+    ${fld('cpExp', 'Expires on (leave empty for none)', c && c.expiryDate ? new Date(c.expiryDate).toLocaleDateString('en-CA') : '', 'date')}
+    ${sel('cpAct', 'Status', [['true', 'Active'], ['false', 'Paused']], !c || c.active ? 'true' : 'false')}
+  </div><p class="adm-note">Customers enter the code at checkout. The server re-checks everything, so editing here is safe.</p>`;
+  openModal(c ? 'Edit coupon ' + esc(c.code) : 'New coupon', body, 'Save coupon', async bg => {
     const code = gv(bg, 'cpCode').toUpperCase().replace(/\s+/g, '');
-    if (!code) { toast('A code is needed'); return false; }
-    const rec = {
-      code, type: bg.querySelector('#cpType').value, value: +gv(bg, 'cpVal') || 0,
-      min: +gv(bg, 'cpMin') || 0, label: gv(bg, 'cpLabel'), active: bg.querySelector('#cpAct').value === '1'
+    if (!code) throw new Error('A coupon code is required');
+    const value = num(gv(bg, 'cpVal'));
+    if (!(value > 0)) throw new Error('Enter a value above zero');
+    const type = gv(bg, 'cpType');
+    if (type === 'PERCENTAGE' && value > 100) throw new Error('A percent coupon cannot exceed 100');
+    const exp = gv(bg, 'cpExp');
+    const payload = {
+      id: c ? c.id : undefined, code, discountType: type, discountValue: value,
+      maxDiscountAmount: gv(bg, 'cpMax') ? num(gv(bg, 'cpMax')) : null,
+      minOrderValue: num(gv(bg, 'cpMin')), usageLimit: Math.floor(num(gv(bg, 'cpUse'))),
+      timesUsed: c ? c.timesUsed : 0,
+      expiryDate: exp ? new Date(exp + 'T23:59:59').toISOString() : null,
+      active: gv(bg, 'cpAct') === 'true'
     };
-    const custom = readList(COUPONS_KEY).filter(x => x.code !== (c ? c.code : code));
-    custom.push(rec);
-    writeList(COUPONS_KEY, custom);
-    audit((c ? 'Coupon updated: ' : 'Coupon created: ') + code);
+    await api('/api/coupons/admin/create', { method: 'POST', body: payload });
     toast(code + ' saved — valid at checkout');
     renderCoupons(el);
     return true;
   });
 }
-function giftCardModal(el) {
-  const body = `<div class="f-grid">
-    ${fld('gcAmt', 'Value (₹)', 1000, 'number')}
-    <div class="field"><label>Theme</label><select id="gcTheme"><option>Festive gold</option><option>Bridal ivory</option><option>Everyday minimal</option></select></div>
-    ${fld('gcTo', 'Recipient name', '')}
-    ${fld('gcEmail', 'Deliver to e-mail', '')}
-    ${fld('gcMsg', 'Message on the card', 'Something sparkly, from me to you.', 'text', true)}
-  </div>`;
-  openModal('Issue gift card', body, 'Issue &amp; e-mail', bg => {
-    const amt = +gv(bg, 'gcAmt') || 0;
-    if (!amt) { toast('Enter a value'); return false; }
-    const code = 'AJ-GIFT-' + amt + '-' + Math.random().toString(36).slice(2, 6).toUpperCase();
-    const list = getGiftCards();
-    list.unshift({ code, amount: amt, balance: amt, recipient: gv(bg, 'gcTo'), email: gv(bg, 'gcEmail'), issued: new Date().toISOString(), theme: bg.querySelector('#gcTheme').value });
-    saveGiftCards(list);
-    /* make the code redeemable at checkout too */
-    const custom = readList(COUPONS_KEY);
-    custom.push({ code, type: 'giftcard', value: amt, min: 0, label: 'Gift card — ' + money(amt) + ' balance', active: true });
-    writeList(COUPONS_KEY, custom);
-    audit('Gift card issued: ' + code + ' (' + money(amt) + ')');
-    toast(code + ' issued — e-mailed to the recipient');
-    renderCoupons(el);
-    return true;
-  });
-}
+
 /* ============================================================
-   DISCOUNTS — rule engine (tiers, bundles, BOGO, stacking)
+   MESSAGES (contact form)
    ============================================================ */
-function renderDiscounts(el) {
-  const rules = getContent().discounts;
-  const active = rules.filter(r => r.status === 'Active');
+const MSG_LABEL = { NEW: 'New', IN_PROGRESS: 'In progress', RESOLVED: 'Resolved' };
+async function renderMessages(el) {
+  const f = el.dataset.f || '';
+  loading(el);
+  let data;
+  try { data = await api('/api/admin/messages?page=0&size=100' + (f ? '&status=' + f : '')); } catch (e) { if (e.status !== 401) failBox(el, e, () => renderMessages(el)); return; }
+  const msgs = pageItems(data);
+  const cnt = s => msgs.filter(m => m.status === s).length;
   el.innerHTML = `
   <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
-    ${kpi('Active rules', active.length, rules.length + ' configured')}
-    ${kpi('Stackable', rules.filter(r => r.stack).length, 'combine with coupons')}
-    ${kpi('First-order discount', getSettings().marketing.firstOrder + '%', 'always on for new buyers')}
-    ${kpi('Referral reward', getSettings().marketing.referral + '%', 'referrer + referee')}
+    ${kpi('New', f ? '—' : cnt('NEW'), 'waiting for a reply', cnt('NEW') > 0 && !f)}
+    ${kpi('In progress', f ? '—' : cnt('IN_PROGRESS'), 'being handled')}
+    ${kpi('Resolved', f ? '—' : cnt('RESOLVED'), 'closed')}
   </div>
-  <div class="adm-alert"><span>🏷️</span><div><b>Discounts run automatically in the cart.</b> Rules evaluate on every cart change; coupons apply on top only where stacking is allowed. Nothing here needs a code.</div></div>
   <div class="adm-toolbar">
-    <span class="pill">Percent · flat · tiered · BOGO · bundle</span>
-    <button class="adm-btn dark" id="dAdd">+ New rule</button>
+    <select id="msF">${[['', 'All messages'], ['NEW', 'New'], ['IN_PROGRESS', 'In progress'], ['RESOLVED', 'Resolved']].map(([v, t]) => `<option value="${v}" ${f === v ? 'selected' : ''}>${t}</option>`).join('')}</select>
+    <span class="pill">${msgs.length} shown</span>
   </div>
-  ${tbl(['Rule', 'Type', 'Value', 'Applies to', 'Condition', 'Stacking', 'Status', 'Actions'], rules.map((r, i) => `<tr>
-    <td><b>${esc(r.name)}</b><br><span class="pill">${esc(r.scope)}</span></td>
-    <td>${chip(r.type, 'info')}</td>
-    <td>${esc(r.value)}</td>
-    <td>${esc(r.scope)}</td>
-    <td class="pill">${esc(r.rule)}</td>
-    <td>${r.stack ? chip('Stacks', 'ok') : chip('Exclusive', 'warn')}</td>
-    <td>${chip(r.status, r.status === 'Active' ? 'ok' : 'warn')}</td>
+  ${msgs.length ? tbl(['From', 'Topic', 'Message', 'Received', 'Status', 'Actions'], msgs.map((m, i) => `<tr>
+    <td><b>${esc(m.name)}</b><br><span class="pill">${esc(m.email || '')}${m.phone ? ' · ' + esc(m.phone) : ''}</span></td>
+    <td>${esc(m.topic || '—')}</td>
+    <td style="max-width:340px">${esc(m.message)}</td>
+    <td>${dtime(m.createdAt)}</td>
+    <td>${chip(MSG_LABEL[m.status] || m.status, m.status === 'NEW' ? 'warn' : m.status === 'RESOLVED' ? 'ok' : 'info')}</td>
     <td><div class="adm-row-actions">
-      <button class="adm-btn" data-dtog="${i}">${r.status === 'Active' ? 'Pause' : 'Activate'}</button>
-      <button class="adm-btn" data-dedit="${i}">Edit</button>
-      <button class="adm-btn" data-ddel="${i}">Delete</button>
-    </div></td></tr>`))}
-  <div class="adm-grid-2" style="margin-top:14px">
-    <div class="adm-card"><h3>Priority &amp; resolution</h3>
-      <table class="adm-kv"><tbody>
-        <tr><td>Best-value rule wins</td><td>Yes</td></tr>
-        <tr><td>Coupon vs discount</td><td>Coupon first, then stacking rules</td></tr>
-        <tr><td>Tiered thresholds</td><td>₹5,000 → 15% · ₹12,000 → 20%</td></tr>
-        <tr><td>BOGO logic</td><td>Lowest-value item free</td></tr>
-        <tr><td>Margin guard-rail</td><td>Never below 42% gross margin</td></tr>
-      </tbody></table>
-      <p class="adm-note">Every rule change is logged in Security &amp; Access → audit trail.</p>
-    </div>
-    <div class="adm-card"><h3>Forecast impact</h3>
-      ${tbl(['Rule', 'Uplift', 'Margin', 'Verdict'], [
-        tr(['First-order welcome', '+18% conversion', '−4.1pp', chip('Keep', 'ok')]),
-        tr(['Festive tiered', '+26% AOV', '−3.2pp', chip('Keep', 'ok')]),
-        tr(['Bridal bundle', '+₹1.2k AOV', '−2.0pp', chip('Watch', 'warn')]),
-        tr(['Cart-value booster', '+9% AOV', '−1.4pp', chip('Keep', 'ok')])
-      ])}
-    </div>
-  </div>`;
-  const persist = l => { saveContent({ discounts: l }); renderDiscounts(el); };
-  el.querySelector('#dAdd').addEventListener('click', () => discountModal(null, el));
-  el.querySelectorAll('[data-dtog]').forEach(b => b.addEventListener('click', () => {
-    const l = rules.slice();
-    l[+b.dataset.dtog].status = l[+b.dataset.dtog].status === 'Active' ? 'Paused' : 'Active';
-    audit('Discount ' + l[+b.dataset.dtog].name + ' → ' + l[+b.dataset.dtog].status);
-    persist(l);
-    toast(l[+b.dataset.dtog].name + ' ' + l[+b.dataset.dtog].status.toLowerCase());
-  }));
-  el.querySelectorAll('[data-dedit]').forEach(b => b.addEventListener('click', () => discountModal(rules[+b.dataset.dedit], el)));
-  el.querySelectorAll('[data-ddel]').forEach(b => b.addEventListener('click', () => {
-    if (!confirm('Delete this discount rule?')) return;
-    audit('Discount deleted: ' + rules[+b.dataset.ddel].name);
-    persist(rules.filter((x, i) => i !== +b.dataset.ddel));
-    toast('Rule deleted');
-  }));
-}
-
-function discountModal(d, el) {
-  const body = `<div class="f-grid">
-    ${fld('dName', 'Rule name', d ? d.name : 'New rule', 'text', true)}
-    <div class="field"><label>Type</label><select id="dType">${['Percent off', 'Flat off', 'Tiered', 'BOGO', 'Bundle'].map(t => `<option ${d && d.type === t ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
-    ${fld('dValue', 'Value', d ? d.value : '10%')}
-    ${fld('dScope', 'Applies to', d ? d.scope : 'Entire order')}
-    ${fld('dRule', 'Condition', d ? d.rule : 'Above ₹5,000')}
-    <div class="field"><label>Stacking</label><select id="dStack"><option value="0" ${!d || !d.stack ? 'selected' : ''}>Exclusive — cannot combine</option><option value="1" ${d && d.stack ? 'selected' : ''}>Stacks with coupons</option></select></div>
-    <div class="field"><label>Status</label><select id="dStatus">${['Active', 'Paused'].map(s => `<option ${d && d.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
-  </div>`;
-  openModal(d ? 'Edit discount' : 'New discount rule', body, 'Save rule', bg => {
-    const list = getContent().discounts.filter(x => x.id !== (d ? d.id : ''));
-    list.push({
-      id: d ? d.id : 'd' + Date.now(), name: gv(bg, 'dName'), type: bg.querySelector('#dType').value,
-      value: gv(bg, 'dValue'), scope: gv(bg, 'dScope'), rule: gv(bg, 'dRule'),
-      stack: bg.querySelector('#dStack').value === '1', status: bg.querySelector('#dStatus').value
-    });
-    saveContent({ discounts: list });
-    audit('Discount saved: ' + gv(bg, 'dName'));
-    toast('Discount rule saved — live in the cart');
-    renderDiscounts(el);
-    return true;
-  });
-}
-/* ============================================================
-   MARKETING — channels, pixels, referral, recovery
-   ============================================================ */
-function renderMarketing(el) {
-  const S = getSettings();
-  const A = S.analytics;
-  const carts = getContent().carts;
-  const recov = S.marketing.abandoned;
-  const cartsValue = carts.reduce((a, c) => a + c.value, 0);
-  el.innerHTML = `
-  <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr))">
-    ${kpi('Abandoned carts', carts.length, moneyK(cartsValue) + ' recoverable')}
-    ${kpi('WhatsApp recovery rate', '18%', '▲ 4% · best channel')}
-    ${kpi('First-order offer', S.marketing.firstOrder + '%', 'new customers only')}
-    ${kpi('Referral reward', S.marketing.referral + '%', 'both sides')}
-    ${kpi('Gift cards issued', getGiftCards().length, 'see Coupons')}
-  </div>
-  <div class="adm-grid-2">
-    <div class="adm-card"><h3>Tracking &amp; feeds</h3>
-      ${tbl(['Integration', 'Identifier', 'Status'], [
-        tr(['Meta Pixel', '<span class="adm-url">' + esc(A.metaPixel) + '</span>', A.enabled ? chip('Live', 'ok') : chip('Awaiting ID', 'warn')]),
-        tr(['Google Analytics 4', '<span class="adm-url">' + esc(A.ga4) + '</span>', A.enabled ? chip('Live', 'ok') : chip('Awaiting ID', 'warn')]),
-        tr(['Google Search Console', esc(A.searchConsole || 'sitemap.xml submitted'), chip('Verified', 'ok')]),
-        tr(['Google Merchant Center', esc(A.merchantCenter || 'Product feed ready'), chip('Feed ready', 'ok')]),
-        tr(['Meta catalogue', esc(A.metaCatalogue || 'CSV feed ready'), chip('Feed ready', 'ok')]),
-        tr(['Conversion tracking', A.conversion ? 'trackEvent() → Purchase, AddToCart, ViewContent' : 'Disabled', A.conversion ? chip('On', 'ok') : chip('Off', 'bad')]),
-        tr(['Product schema / SEO', 'JSON-LD Product + Offer + AggregateRating', chip('On', 'ok')])
-      ])}
-      <div class="f-grid" style="margin-top:16px">
-        ${fld('mkGa4', 'GA4 measurement ID', A.ga4)}
-        ${fld('mkPixel', 'Meta Pixel ID', A.metaPixel)}
-        ${fld('mkSc', 'Search Console verification', A.searchConsole)}
-        ${fld('mkMc', 'Merchant Center feed ID', A.merchantCenter)}
-      </div>
-      ${swRow('mkEnabled', 'Load analytics scripts', 'Snippets inject only when this is on — keeps localhost clean', A.enabled)}
-      ${swRow('mkConv', 'Conversion events', 'Purchase · AddToCart · ViewContent · BeginCheckout', A.conversion)}
-      <div class="adm-row-actions" style="margin-top:14px"><button class="adm-btn dark" id="mkSave">Save tracking</button></div>
-      <p class="adm-note">Values are written to <span class="adm-url">localStorage → amour_settings_v2</span> and read by <span class="adm-url">loadAnalytics()</span> on every page.</p>
-    </div>
-    <div class="adm-card"><h3>Abandoned-cart journey</h3>
-      <table class="adm-kv"><tbody>
-        <tr><td>Step 1 · nudge</td><td>${esc(recov.nudge)} — WhatsApp</td></tr>
-        <tr><td>Step 2 · incentive</td><td>${esc(recov.follow)} — e-mail + WhatsApp</td></tr>
-        <tr><td>Step 3 · final</td><td>${esc(recov.final)} — e-mail</td></tr>
-        <tr><td>Recoverable value</td><td>${money(cartsValue)}</td></tr>
-      </tbody></table>
-      <h3 style="font-size:13px;margin:16px 0 10px">Today's carts waiting</h3>
-      ${tbl(['Customer', 'Value', 'Attempts'], carts.slice(0, 5).map(c => tr([esc(c.name), money(c.value), c.attempts])))}
-      <div class="adm-row-actions" style="margin-top:12px">
-        <button class="adm-btn dark" id="mkRunRecovery">Run recovery now</button>
-        <button class="adm-btn" id="mkBlog">Open Abandoned Carts</button>
-      </div>
-    </div>
-  </div>
-  <div class="adm-grid-2" style="margin-top:14px">
-    <div class="adm-card"><h3>Referral programme</h3>
-      ${tbl(['Referrer', 'Code', 'Invites', 'Converted', 'Reward earned'], [
-        tr(['Meera K.', 'REF-MEERA10', 24, 6, money(6300)]),
-        tr(['Ananya S.', 'REF-ANANYA10', 11, 3, money(3150)]),
-        tr(['Farah Q.', 'REF-FARAH10', 8, 2, money(2100)])
-      ])}
-      <p class="adm-note">Reward is issued as a coupon once the referee's order is delivered — prevents refund abuse.</p>
-    </div>
-    <div class="adm-card"><h3>Channel performance (30d)</h3>
-      ${tbl(['Channel', 'Spend', 'Revenue', 'ROAS'], [
-        tr(['Meta ads', money(41200), money(198400), chip('4.8×', 'ok')]),
-        tr(['Google Shopping', money(28600), money(121900), chip('4.3×', 'ok')]),
-        tr(['Influencer seeding', money(15000), money(48900), chip('3.3×', 'info')]),
-        tr(['WhatsApp broadcast', money(1800), money(26400), chip('14.7×', 'ok')])
-      ])}
-      <p class="adm-note">WhatsApp is the cheapest channel per rupee — broadcasts are throttled to opted-in contacts only.</p>
-    </div>
-  </div>`;
-  const sw = (id, key) => { const c = el.querySelector('#' + id); return c ? c.checked : false; };
-  el.querySelector('#mkSave').addEventListener('click', () => {
-    saveSettings({ analytics: {
-      ga4: gv(el, 'mkGa4') || 'G-XXXXXXXXXX', metaPixel: gv(el, 'mkPixel') || '000000000000000',
-      searchConsole: gv(el, 'mkSc'), merchantCenter: gv(el, 'mkMc'),
-      enabled: sw('mkEnabled'), conversion: sw('mkConv')
-    } });
-    audit('Analytics settings updated (enabled=' + sw('mkEnabled') + ')');
-    toast(sw('mkEnabled') ? 'Tracking live — GA4 + Meta Pixel injecting' : 'Tracking saved (scripts off)');
-    renderMarketing(el);
-  });
-  el.querySelector('#mkRunRecovery').addEventListener('click', () => {
-    const list = getContent().carts.map(c => Object.assign({}, c, { attempts: c.attempts + 1 }));
-    saveContent({ carts: list });
-    audit('Abandoned-cart recovery run (WhatsApp + e-mail)');
-    toast('Recovery sent to ' + list.length + ' carts · +' + moneyK(list.reduce((a, c) => a + c.value, 0)) + ' in play');
-    renderMarketing(el);
-  });
-  el.querySelector('#mkBlog').addEventListener('click', () => renderSection('abandoned'));
-}
-/* ============================================================
-   WHATSAPP — order journey, templates, broadcasts
-   ============================================================ */
-const WA_TEMPLATES = {
-  order_confirmed:  'Hi {{name}}, thank you for your Amour Jewels order {{order}}. We received {{amount}} and your pieces are being prepared at the Amour atelier. Invoice: {{invoice}}',
-  payment_confirmed:'Payment of {{amount}} received for {{order}} ✔ Your order is confirmed and in the atelier queue.',
-  packed_atelier:   '{{order}} is packed ✨ Hand-finished, quality-checked and sealed in the keepsake box at the Amour atelier.',
-  shipment_tracking:'{{order}} is on its way 🚚 Courier: {{courier}} · AWB {{awb}}. Track live: {{link}}',
-  out_for_delivery: 'Good news — {{order}} is out for delivery today. Please keep {{phone}} reachable for the courier.',
-  delivered_care:   'Delivered ✔ We hope you love it. Care tip: keep your piece away from perfume and store it in the pouch provided.',
-  review_request:   'How did we do? Rate your {{product}} in 10 seconds and get ₹200 off your next order: {{reviewLink}}',
-  return_approved:  'Your return for {{order}} is approved. Reverse pickup is booked — the courier will call before arriving.',
-  refund_processed: 'Refund of {{amount}} for {{order}} is processed. It will reflect in 3–5 working days.',
-  back_in_stock:    'Good news — {{product}} is back in stock. It sold out twice, so don\u2019t wait too long: {{link}}'
-};
-const WA_STAGE_KEY = {
-  'Order placed': 'placed', 'Payment received': 'paid', 'Order packed': 'packed', 'Shipped + AWB': 'shipped',
-  'Out for delivery': 'ofd', 'Delivered': 'delivered', 'Review request': 'review',
-  'Return approved': 'returnApproved', 'Refund processed': 'refundProcessed', 'Back in stock': 'backInStock'
-};
-
-function waJourneyCard(stages) {
-  return `<div class="adm-card" style="margin-bottom:14px">
-    <h3>Order &amp; lifecycle journey</h3>
-    ${tbl(['Stage', 'Channels', 'Template', 'Timing', 'Status'], DEMO_NOTIFICATIONS.map((n, i) => {
-      const key = WA_STAGE_KEY[n.stage];
-      const active = stages[key] !== false;
-      return `<tr>
-        <td><b>${esc(n.stage)}</b></td>
-        <td>${esc(n.ch)}</td>
-        <td><span class="adm-url">${esc(n.tpl)}</span></td>
-        <td>${esc(n.when)}</td>
-        <td><div class="adm-row-actions" style="align-items:center">
-          ${chip(active ? 'On' : 'Off', active ? 'ok' : 'bad')}
-          <button class="adm-btn" data-watog="${i}">${active ? 'Turn off' : 'Turn on'}</button>
-          <button class="adm-btn" data-waview="${i}">Preview</button>
-        </div></td></tr>`;
-    }))}
-    <p class="adm-note">Turning a stage off stops the WhatsApp/SMS send for that trigger only — e-mail fallback keeps running.</p>
-  </div>`;
-}
-function waTemplateCard() {
-  return `<div class="adm-card"><h3>Template library</h3>
-    ${tbl(['Template', 'Body preview', ''], Object.keys(WA_TEMPLATES).map(k => tr([
-      '<span class="adm-url">' + k + '</span>',
-      '<span class="pill">' + esc(WA_TEMPLATES[k].slice(0, 62)) + '…</span>',
-      `<button class="adm-btn" data-tpl="${k}">Edit</button>`
-    ])))}
-    <p class="adm-note">Variables: {{name}} {{order}} {{amount}} {{product}} {{awb}} {{courier}} {{link}}. Meta requires template approval before production use.</p>
-  </div>`;
-}
-function waBroadcastCard(logs) {
-  return `<div class="adm-card"><h3>Broadcast to opted-in contacts</h3>
-    <div class="f-grid">
-      <div class="field"><label>Audience</label><select id="waAudience"><option>All opted-in (1,942)</option><option>Returning customers</option><option>Bridal enquiries</option><option>Cart abandoners (24 hrs)</option><option>VIP (3+ orders)</option></select></div>
-      <div class="field"><label>Template</label><select id="waTpl"><option>Festive campaign</option><option>New drop announcement</option><option>Back in stock</option><option>Bridal appointment invite</option></select></div>
-      <div class="field full"><label>Message</label><input id="waMsg" value="The Festive Edit ’26 is live — first 100 orders get a pearl pouch "></div>
-    </div>
-    <button class="adm-btn dark" id="waSend">Send broadcast</button>
-    <p class="adm-note">Rate-limited to Meta's messaging tier; opted-out contacts are stripped automatically before send.</p>
-    ${logs.length ? `<h3 style="font-size:13px;margin:18px 0 10px">Recent broadcasts</h3>
-      ${tbl(['Sent', 'Audience', 'Reach', 'Clicks'], logs.slice(0, 5).map(b => tr([dshort(b.at), esc(b.audience), b.reach, b.clicks])))}` : ''}
-  </div>`;
-}
-
-function renderWhatsApp(el) {
-  const S = getSettings().whatsapp;
-  const stages = S.stages || {};
-  const on = DEMO_NOTIFICATIONS.filter(n => stages[WA_STAGE_KEY[n.stage]] !== false).length;
-  const logs = getBroadcasts();
-  el.innerHTML = `
-  <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(168px,1fr))">
-    ${kpi('Messages sent (30d)', '4,318', '▲ 12%')}
-    ${kpi('Delivery rate', '97.2%', 'industry-leading')}
-    ${kpi('Read rate', '84.6%', 'vs 21% e-mail')}
-    ${kpi('Click-through', '31.4%', 'tracking links')}
-    ${kpi('Opted-in contacts', '1,942', 'transactional + marketing')}
-    ${kpi('Journeys live', on + '/' + DEMO_NOTIFICATIONS.length, 'every stage covered')}
-  </div>
-  <div class="adm-alert ok"><span>✅</span><div><b>Business number verified:</b> <span class="adm-url">+${esc(S.number)}</span> — WhatsApp Business API, green tick pending Meta review. Opt-outs are honoured instantly across every template.</div></div>
-  ${waJourneyCard(stages)}
-  <div class="adm-grid-2">${waBroadcastCard(logs)}${waTemplateCard()}</div>`;
-  el.querySelectorAll('[data-watog]').forEach(b => b.addEventListener('click', () => {
-    const n = DEMO_NOTIFICATIONS[+b.dataset.watog];
-    const key = WA_STAGE_KEY[n.stage];
-    const next = Object.assign({}, getSettings().whatsapp.stages);
-    next[key] = next[key] === false;
-    saveSettings({ whatsapp: { stages: next } });
-    audit('WhatsApp stage ' + n.stage + ' → ' + (next[key] ? 'On' : 'Off'));
-    toast(n.stage + ': ' + (next[key] ? 'notifications on' : 'notifications off'));
-    renderWhatsApp(el);
-  }));
-  el.querySelectorAll('[data-waview]').forEach(b => b.addEventListener('click', () => {
-    const n = DEMO_NOTIFICATIONS[+b.dataset.waview];
-    openModal('Preview — ' + esc(n.stage), `<div class="adm-code">${esc(WA_TEMPLATES[n.tpl] || '')}</div><p class="adm-note">Channels: ${esc(n.ch)} · Timing: ${esc(n.when)}</p>`, 'Close', () => true);
-  }));
-  el.querySelectorAll('[data-tpl]').forEach(b => b.addEventListener('click', () => {
-    const k = b.dataset.tpl;
-    openModal('Edit template — ' + k, `<div class="f-grid"><div class="field full"><label>Body</label><input id="tplBody" value="${esc(WA_TEMPLATES[k])}"></div></div><p class="adm-note">Production templates must be resubmitted to Meta for approval after edits.</p>`, 'Save template', bg => {
-      audit('WhatsApp template edited: ' + k);
-      toast('Template ' + k + ' saved');
-      return true;
-    });
-  }));
-  el.querySelector('#waSend').addEventListener('click', () => {
-    const audience = el.querySelector('#waAudience').value;
-    const msg = el.querySelector('#waMsg').value.trim();
-    const reach = audience.indexOf('1,942') > -1 ? 1942 : audience.indexOf('VIP') > -1 ? 312 : audience.indexOf('Cart') > -1 ? 128 : 640;
-    const list = getBroadcasts();
-    list.unshift({ at: new Date().toISOString(), audience, reach, clicks: Math.round(reach * 0.31), msg });
-    saveBroadcasts(list);
-    audit('WhatsApp broadcast → ' + audience + ' (' + reach + ')');
-    toast('Broadcast queued to ' + reach + ' contacts');
-    renderWhatsApp(el);
-  });
-}
-/* ============================================================
-   ABANDONED CARTS — recovery journey with discount escalation
-   ============================================================ */
-function renderAbandoned(el) {
-  const carts = getContent().carts;
-  const settings = getSettings();
-  const j = settings.marketing.abandoned;
-  const value = carts.reduce((a, c) => a + c.value, 0);
-  const recurrence = settings.marketing.recovered || {};
-  const recovered = carts.filter(c => recurrence[c.email]);
-  el.innerHTML = `
-  <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(165px,1fr))">
-    ${kpi('Open carts', carts.filter(c => !recurrence[c.email]).length, moneyK(value) + ' in play')}
-    ${kpi('Recovered', recovered.length, moneyK(recovered.reduce((a, c) => a + c.value, 0)) + ' won back')}
-    ${kpi('Recovery rate', pct(recovered.length, carts.length) + '%', 'WhatsApp-first')}
-    ${kpi('Avg cart value', moneyK(value / (carts.length || 1)), 'above AOV')}
-    ${kpi('Messages sent', carts.reduce((a, c) => a + c.attempts, 0), 'across all carts')}
-  </div>
-  <div class="adm-alert"><span>🛒</span><div><b>Journey:</b> ${esc(j.nudge)} WhatsApp nudge → ${esc(j.follow)} e-mail + WhatsApp with a 5% code → ${esc(j.final)} final e-mail. WhatsApp is tried first whenever a number is on file — it converts 3–4× better than e-mail in India.</div></div>
-  ${tbl(['Customer', 'Cart contents', 'Value', 'Abandoned', 'Contactable', 'Attempts', 'Stage', 'Actions'], carts.map((c, i) => {
-    const done = !!recurrence[c.email];
-    const stage = done ? 'Recovered' : c.attempts === 0 ? 'Step 1 · nudge' : c.attempts === 1 ? 'Step 2 · 5% code' : 'Step 3 · final';
-    return `<tr>
-      <td><b>${esc(c.name)}</b><br><span class="pill">${esc(c.email)}</span></td>
-      <td class="pill" style="max-width:220px">${esc(c.items)}</td>
-      <td>${money(c.value)}</td>
-      <td>${esc(c.ago)}</td>
-      <td>${c.opted ? chip('WhatsApp + e-mail', 'ok') : chip('E-mail only', 'warn')}</td>
-      <td>${c.attempts}</td>
-      <td>${done ? chip('Recovered', 'ok') : chip(stage, c.attempts >= 2 ? 'bad' : 'info')}</td>
-      <td><div class="adm-row-actions">
-        ${done ? '' : `<button class="adm-btn dark" data-wa="${i}">WhatsApp</button><button class="adm-btn" data-em="${i}">E-mail</button>`}
-        <button class="adm-btn" data-code="${i}">Issue code</button>
-        ${done ? '' : `<button class="adm-btn" data-mark="${i}">Mark recovered</button>`}
-      </div></td></tr>`;
-  }))}
-  <div class="adm-grid-2" style="margin-top:14px">
-    <div class="adm-card"><h3>Step settings</h3>
-      <div class="f-grid">
-        ${fld('abNudge', 'Step 1 delay', j.nudge)}
-        ${fld('abFollow', 'Step 2 delay + incentive', j.follow)}
-        ${fld('abFinal', 'Step 3 delay', j.final)}
-        ${fld('abCode', 'Recovery code value (%)', '5', 'number')}
-      </div>
-      <button class="adm-btn dark" id="abSave">Save journey</button>
-    </div>
-    <div class="adm-card"><h3>What works in India</h3>
-      <table class="adm-kv"><tbody>
-        <tr><td>WhatsApp open rate</td><td>84.6%</td></tr>
-        <tr><td>E-mail open rate</td><td>21.3%</td></tr>
-        <tr><td>Best-performing delay</td><td>60–90 min</td></tr>
-        <tr><td>Incentive that converts</td><td>5% (not 10% — protects margin)</td></tr>
-        <tr><td>Never</td><td>Message after purchase completes</td></tr>
-      </tbody></table>
-    </div>
-  </div>`;
-  const persist = (list, note) => { saveContent({ carts: list }); audit(note); renderAbandoned(el); };
-  el.querySelectorAll('[data-wa]').forEach(b => b.addEventListener('click', () => {
-    const l = carts.slice(); l[+b.dataset.wa].attempts++;
-    persist(l, 'Abandoned cart WhatsApp sent: ' + l[+b.dataset.wa].name);
-    toast('WhatsApp recovery sent to ' + l[+b.dataset.wa].name);
-  }));
-  el.querySelectorAll('[data-em]').forEach(b => b.addEventListener('click', () => {
-    const l = carts.slice(); l[+b.dataset.em].attempts++;
-    persist(l, 'Abandoned cart e-mail sent: ' + l[+b.dataset.em].name);
-    toast('Recovery e-mail sent to ' + l[+b.dataset.em].name);
-  }));
-  el.querySelectorAll('[data-code]').forEach(b => b.addEventListener('click', () => {
-    const c = carts[+b.dataset.code];
-    const code = 'COMEBACK5-' + c.name.split(' ')[0].toUpperCase();
-    const custom = readList(COUPONS_KEY);
-    custom.push({ code, type: 'pct', value: 5, min: 2000, label: 'Recovery code for ' + c.name, active: true });
-    writeList(COUPONS_KEY, custom);
-    audit('Recovery coupon issued: ' + code);
-    toast(code + ' issued — valid for 48 hrs at checkout');
-  }));
-  el.querySelectorAll('[data-mark]').forEach(b => b.addEventListener('click', () => {
-    const c = carts[+b.dataset.mark];
-    const rec = Object.assign({}, getSettings().marketing.recovered);
-    rec[c.email] = new Date().toISOString();
-    saveSettings({ marketing: { recovered: rec } });
-    audit('Cart marked recovered: ' + c.name + ' (' + money(c.value) + ')');
-    toast(c.name + ' recovered · ' + money(c.value) + ' won back');
-    renderAbandoned(el);
-  }));
-  el.querySelector('#abSave').addEventListener('click', () => {
-    saveSettings({ marketing: { abandoned: { nudge: gv(el, 'abNudge'), follow: gv(el, 'abFollow'), final: gv(el, 'abFinal') } } });
-    audit('Abandoned-cart journey timings updated');
-    toast('Recovery journey saved');
-    renderAbandoned(el);
-  });
-}
-/* ============================================================
-   MESSAGES — unified inbox + broadcasts + notifications
-   ============================================================ */
-function renderMessages(el) {
-  const msgs = getContent().messages;
-  const f = el.dataset.f || 'All';
-  const list = msgs.filter(m => f === 'All' || m.channel === f);
-  const logs = getBroadcasts();
-  const persist = l => { saveContent({ messages: l }); renderMessages(el); };
-  el.innerHTML = `
-  <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
-    ${kpi('Open conversations', msgs.filter(m => m.state === 'Open').length, 'reply SLA 4 hrs', true)}
-    ${kpi('Replied', msgs.filter(m => m.state === 'Replied').length, 'awaiting customer')}
-    ${kpi('Closed', msgs.filter(m => m.state === 'Closed').length, 'resolved')}
-    ${kpi('Avg first response', '38 min', '▲ 12 min faster')}
-    ${kpi('Broadcasts sent', logs.length, 'WhatsApp + e-mail')}
-  </div>
-  <div class="adm-toolbar">
-    <select id="msF">${['All', 'WhatsApp', 'Email', 'Instagram'].map(c => `<option ${f === c ? 'selected' : ''}>${c}</option>`).join('')}</select>
-    <span class="pill">${list.length} shown</span>
-  </div>
-  ${list.length ? tbl(['From', 'Channel', 'Message', 'Received', 'Status', 'Actions'], list.map(m => {
-    const i = msgs.indexOf(m);
-    return `<tr>
-      <td><b>${esc(m.name)}</b></td>
-      <td>${chip(m.channel, m.channel === 'WhatsApp' ? 'ok' : m.channel === 'Email' ? 'info' : 'warn')}</td>
-      <td style="max-width:320px">${esc(m.text)}</td>
-      <td>${esc(m.ago)}</td>
-      <td>${chip(m.state, m.state === 'Open' ? 'warn' : m.state === 'Replied' ? 'info' : 'ok')}</td>
-      <td><div class="adm-row-actions">
-        <button class="adm-btn dark" data-reply="${i}">Reply</button>
-        ${m.state !== 'Closed' ? `<button class="adm-btn" data-close="${i}">Close</button>` : ''}
-      </div></td></tr>`;
-  })) : '<p class="adm-note">No conversations in this channel.</p>'}
-  <div class="adm-grid-2" style="margin-top:14px">
-    <div class="adm-card"><h3>Broadcast &amp; notifications</h3>
-      <div class="f-grid">
-        <div class="field"><label>Channel</label><select id="bcChannel"><option>WhatsApp</option><option>Email</option><option>SMS</option><option>WhatsApp + Email</option></select></div>
-        <div class="field"><label>Audience</label><select id="bcAud"><option>All opted-in (1,942)</option><option>Returning customers</option><option>Bridal enquiries</option><option>VIP (3+ orders)</option><option>Cart abandoners</option></select></div>
-        <div class="field full"><label>Message</label><input id="bcText" value="Festive Edit ’26 is live — first 100 orders get a pearl pouch"></div>
-        <div class="field"><label>Send</label><select id="bcWhen"><option>Now</option><option>Schedule 10:00 IST tomorrow</option><option>Schedule Sunday 18:00</option></select></div>
-      </div>
-      <button class="adm-btn dark" id="bcSend">Send broadcast</button>
-      <p class="adm-note">Transactional notifications (order, shipping, refund) are configured in WhatsApp; this composer is for campaigns.</p>
-    </div>
-    <div class="adm-card"><h3>Notification coverage</h3>
-      ${tbl(['Stage', 'Channels', 'Status'], DEMO_NOTIFICATIONS.map(n => tr([esc(n.stage), esc(n.ch), chip('Configured', 'ok')])))}
-      <p class="adm-note">Every lifecycle stage has a template; e-mail runs as automatic fallback when WhatsApp is off.</p>
-    </div>
-  </div>`;
+      ${m.email ? `<a class="adm-btn dark" data-mreply="${i}" href="mailto:${esc(m.email)}?subject=${encodeURIComponent('Re: ' + (m.topic || 'Your message to Amour Jewels'))}">Reply</a>` : ''}
+      ${m.status === 'NEW' ? `<button class="adm-btn" data-mst="${i}" data-s="IN_PROGRESS">Start</button>` : ''}
+      ${m.status !== 'RESOLVED' ? `<button class="adm-btn" data-mst="${i}" data-s="RESOLVED">Resolve</button>` : ''}
+    </div></td></tr>`)) : '<p class="adm-note">No messages in this view.</p>'}
+  <p class="adm-note">"Reply" opens your e-mail app. Mark a message In progress or Resolved here so the team can see where it stands.</p>`;
   el.querySelector('#msF').addEventListener('change', e => { el.dataset.f = e.target.value; renderMessages(el); });
-  el.querySelectorAll('[data-reply]').forEach(b => b.addEventListener('click', () => {
-    const m = msgs[+b.dataset.reply];
-    openModal('Reply to ' + esc(m.name) + ' · ' + esc(m.channel),
-      `<div class="adm-code">${esc(m.text)}</div><div class="f-grid" style="margin-top:14px"><div class="field full"><label>Your reply</label><input id="msgReply" value="Thank you for writing in — happy to help right away."></div></div>`,
-      'Send reply', bg => {
-        const l = msgs.slice(); l[+b.dataset.reply].state = 'Replied';
-        audit('Reply sent to ' + m.name + ' via ' + m.channel);
-        persist(l);
-        toast('Reply sent via ' + m.channel);
-        return true;
-      });
+  el.querySelectorAll('[data-mst]').forEach(b => b.addEventListener('click', async () => {
+    const m = msgs[+b.dataset.mst];
+    const done = await act(b, () => api('/api/admin/messages/' + encodeURIComponent(m.id) + '/status', { method: 'PATCH', body: { status: b.dataset.s } }), 'Message marked ' + MSG_LABEL[b.dataset.s]);
+    if (done) renderMessages(el);
   }));
-  el.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', () => {
-    const l = msgs.slice(); l[+b.dataset.close].state = 'Closed';
-    audit('Conversation closed: ' + l[+b.dataset.close].name);
-    persist(l);
-    toast('Conversation closed');
-  }));
-  el.querySelector('#bcSend').addEventListener('click', () => {
-    const ch = el.querySelector('#bcChannel').value;
-    const aud = el.querySelector('#bcAud').value;
-    const when = el.querySelector('#bcWhen').value;
-    const reach = ch === 'Email' ? 3860 : aud.indexOf('1,942') > -1 ? 1942 : 640;
-    const l = getBroadcasts();
-    l.unshift({ at: new Date().toISOString(), audience: aud + ' · ' + ch, reach, clicks: Math.round(reach * 0.28), msg: gv(el, 'bcText') });
-    saveBroadcasts(l);
-    audit('Broadcast queued via ' + ch + ' → ' + aud);
-    toast(ch + ' broadcast ' + (when === 'Now' ? 'sent to ' : 'scheduled for ') + reach + ' contacts');
-    renderMessages(el);
-  });
 }
-/* ============================================================
-   SHIPPING — rates (live at checkout), couriers, serviceability
-   ============================================================ */
-const DEMO_COURIERS = [
-  { name: 'Delhivery',    priority: 1, zones: 'All India',        sla: '3–6 days',  status: 'Connected' },
-  { name: 'Blue Dart',    priority: 2, zones: 'Metros + Tier 2',  sla: '2–3 days',  status: 'Connected' },
-  { name: 'XpressBees',   priority: 3, zones: 'Tier 2 / Tier 3',  sla: '4–7 days',  status: 'Connected' },
-  { name: 'Ecom Express', priority: 4, zones: 'Overflow',         sla: '4–8 days',  status: 'Connected' },
-  { name: 'India Post',   priority: 5, zones: 'Remote PIN codes', sla: '7–12 days', status: 'Standby' }
-];
 
-function renderShipping(el) {
-  const S = getSettings().shipping;
-  seedOrdersIfEmpty();
-  const orders = getOrders();
-  const inTransit = orders.filter(o => ['Shipped', 'In Transit', 'Out for Delivery'].includes(o.status));
+/* ============================================================
+   SHIPPING
+   ============================================================ */
+async function renderShipping(el) {
+  loading(el);
+  let orders;
+  try { orders = await recentOrders(true); } catch (e) { if (e.status !== 401) failBox(el, e, () => renderShipping(el)); return; }
+  const toShip = orders.filter(o => ['PAID', 'PAYMENT_CONFIRMED', 'PLACED', 'PROCESSING', 'PROCESSING_SHIPMENT', 'PACKED'].includes(o.status));
+  const moving = orders.filter(o => o.status === 'SHIPPED' || o.status === 'IN_TRANSIT');
   el.innerHTML = `
   <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(165px,1fr))">
-    ${kpi('Free-shipping threshold', money(S.freeShip), 'live at checkout')}
-    ${kpi('Standard rate', money(S.std), '3–6 days')}
-    ${kpi('Express rate', money(S.express), '2–3 days')}
-    <div class="kpi"><span>Shipments in transit</span><b>${inTransit.length}</b><em>tracking synced</em></div>
+    ${kpi('Free shipping from', money(2000), 'set in the backend')}
+    ${kpi('Shipping fee below that', money(100), 'flat rate')}
+    ${kpi('Waiting to dispatch', toShip.length, 'paid, not yet shipped', toShip.length > 0)}
+    ${kpi('On the way', moving.length, 'shipped / in transit')}
   </div>
+  <div class="adm-alert"><span>📦</span><div><b>Dispatch flow:</b> a paid order is pushed to Shiprocket automatically. Book the courier and get the AWB in the Shiprocket dashboard, then open the order here, enter the AWB and press <b>Shipped</b> — the customer is e-mailed with the tracking link.</div></div>
   <div class="adm-grid-2">
-    <div class="adm-card"><h3>Rate card &amp; rules</h3>
-      <div class="f-grid">
-        ${fld('shFree', 'Free shipping above (₹)', S.freeShip, 'number')}
-        ${fld('shStd', 'Standard fee (₹)', S.std, 'number')}
-        ${fld('shExp', 'Express fee (₹)', S.express, 'number')}
-      </div>
-      <button class="adm-btn dark" id="shSave">Save rates</button>
-      <p class="adm-note">Saving writes to <span class="adm-url">STORE</span> — the cart and checkout read the new numbers instantly.</p>
+    <div class="adm-card"><h3>Waiting to dispatch</h3>
+      ${toShip.length ? tbl(['Order', 'Customer', 'PIN', 'Status'], toShip.map(o => tr([esc(o.orderNumber || o.id), esc(customerOf(o)), esc((o.shippingAddress || {}).zipCode || '—'), statusChip(o.status)]))) : '<p class="adm-note">Nothing waiting — all paid orders have shipped.</p>'}
     </div>
-    <div class="adm-card"><h3>Courier partners</h3>
-      ${tbl(['Courier', 'Priority', 'Zones', 'SLA', 'Status'], DEMO_COURIERS.map(c => tr([
-        '<b>' + esc(c.name) + '</b>', c.priority, esc(c.zones), esc(c.sla),
-        chip(c.status, c.status === 'Connected' ? 'ok' : 'info')
-      ])))}
-      <p class="adm-note">Routing picks the cheapest serviceable courier per PIN code; failed pickups auto-reassign to the next partner.</p>
-      <h3 style="font-size:13px;margin:18px 0 10px">Live shipments</h3>
-      ${inTransit.length ? tbl(['Order', 'Courier', 'AWB', 'Status'], inTransit.map(o => tr([o.id, esc(o.courier || '—'), '<span class="adm-url">' + esc(o.awb || '—') + '</span>', statusChip(o.status)]))) : '<p class="adm-note">No shipments in transit right now.</p>'}
+    <div class="adm-card"><h3>On the way</h3>
+      ${moving.length ? tbl(['Order', 'Courier', 'AWB', 'Status'], moving.map(o => tr([esc(o.orderNumber || o.id), esc(o.courierName || '—'), '<span class="adm-url">' + esc(o.awbNumber || o.trackingNumber || '—') + '</span>', statusChip(o.status)]))) : '<p class="adm-note">No shipments in transit right now.</p>'}
     </div>
   </div>
   <div class="adm-grid-2" style="margin-top:14px">
     <div class="adm-card"><h3>Serviceability checker</h3>
-      <div class="f-grid">
-        ${fld('pinCheck', 'PIN code', '110001')}
-        ${fld('pinValue', 'Cart value (₹)', 4850, 'number')}
-      </div>
+      <div class="f-grid">${fld('pinCheck', 'PIN code', '110001', 'text', false, 'maxlength="6" inputmode="numeric"')}</div>
       <button class="adm-btn dark" id="pinRun">Check PIN code</button>
       <div id="pinOut" style="margin-top:14px"></div>
-      <p class="adm-note">Uses the same <span class="adm-url">pincodeInfo()</span> rules as the product page widget: zone ETAs and courier choice.</p>
+      <p class="adm-note">Uses the same check as the product page widget.</p>
     </div>
-    <div class="adm-card"><h3>Packaging &amp; insurance</h3>
+    <div class="adm-card"><h3>Packaging &amp; policy</h3>
       <table class="adm-kv"><tbody>
-        <tr><td>Insured shipping</td><td>Complimentary above ${money(S.freeShip)}</td></tr>
-        <tr><td>Signature on delivery</td><td>Orders above ₹10,000</td></tr>
-        <tr><td>Keepsake box</td><td>Every piece, as standard</td></tr>
-        <tr><td>Tamper-proof seal</td><td>Yes</td></tr>
-        <tr><td>International</td><td>On request · DHL Express</td></tr>
-        <tr><td>Dispatch SLA</td><td>Within 24 hrs of order</td></tr>
+        <tr><td>Free shipping</td><td>Orders of ${money(2000)} and above</td></tr>
+        <tr><td>Returns</td><td>7 days from delivery</td></tr>
+        <tr><td>Dispatch SLA</td><td>Within 24 hrs of payment</td></tr>
       </tbody></table>
-      <p class="adm-note">Packing stations scan the AWB to trigger the WhatsApp "shipped" template automatically.</p>
+      <p class="adm-note">The shipping fee and free-shipping limit live in the backend order code. Tell me if you want them editable from this screen.</p>
     </div>
   </div>`;
-  el.querySelector('#shSave').addEventListener('click', () => {
-    saveSettings({ shipping: {
-      freeShip: +gv(el, 'shFree') || 0, std: +gv(el, 'shStd') || 0, express: +gv(el, 'shExp') || 0
-    } });
-    audit('Shipping rates updated (free above ' + money(+gv(el, 'shFree')) + ')');
-    toast('Shipping rates saved — live at checkout');
-    renderShipping(el);
-  });
-  el.querySelector('#pinRun').addEventListener('click', () => {
-    const pin = gv(el, 'pinCheck');
-    const info = pincodeInfo(pin);
-    const out = el.querySelector('#pinOut');
-    if (!info) { out.innerHTML = '<div class="adm-alert bad"><span>⚠️</span><div>Enter a valid 6-digit PIN code.</div></div>'; return; }
-    const cartValue = +gv(el, 'pinValue') || 0;
-    const shipping = cartValue >= S.freeShip ? 0 : S.std;
-    out.innerHTML = `<table class="adm-kv"><tbody>
-      <tr><td>Serviceable</td><td>${info.serviceable ? 'Yes' : 'No'}</td></tr>
-      <tr><td>Courier</td><td>${esc(info.courier)}</td></tr>
-      <tr><td>ETA</td><td>${esc(info.eta)}</td></tr>
-      <tr><td>Express</td><td>${info.express ? 'Available' : 'No'}</td></tr>
-      <tr><td>Shipping charged</td><td>${shipping ? money(shipping) : 'Free'}</td></tr>
-    </tbody></table>`;
-    audit('Serviceability checked for ' + pin);
+  el.querySelector('#pinRun').addEventListener('click', async () => {
+    const pin = gv(el, 'pinCheck'), out = el.querySelector('#pinOut');
+    try {
+      const r = await api('/api/pincode/' + encodeURIComponent(pin));
+      out.innerHTML = `<table class="adm-kv"><tbody>
+        <tr><td>Serviceable</td><td>${r.serviceable ? 'Yes' : 'No'}</td></tr>
+        ${r.serviceable ? `<tr><td>Courier</td><td>${esc(r.courier)}</td></tr><tr><td>ETA</td><td>${esc(r.eta)}</td></tr>` : ''}
+      </tbody></table>`;
+    } catch (e) { out.innerHTML = '<div class="adm-alert bad"><span>⚠️</span><div>' + esc(e.message) + '</div></div>'; }
   });
 }
+
 /* ============================================================
-   GST & INVOICING — tax config (live), register, summary
+   GST & INVOICES (estimate — your CA owns the final numbers)
    ============================================================ */
-function renderGST(el) {
-  const G = getSettings().gst;
-  seedOrdersIfEmpty();
-  const orders = getOrders();
+function gstPrefs() {
+  try { return Object.assign({ rate: 3, state: '' }, JSON.parse(localStorage.getItem('amour_gst_prefs_v1')) || {}); } catch (e) { return { rate: 3, state: '' }; }
+}
+async function renderGST(el) {
+  loading(el);
+  let orders;
+  try { orders = (await recentOrders(true)).filter(isPaidOrder); } catch (e) { if (e.status !== 401) failBox(el, e, () => renderGST(el)); return; }
+  const P = gstPrefs();
+  const rate = (num(P.rate) || 0) / 100;
   const rows = orders.map(o => {
-    const buyerState = (o.customer && o.customer.state) || STORE.sellerState;
-    const g = gstSplit(o.sub || 0, G.rate, buyerState);
-    return { o, g, buyerState };
+    const taxable = o.totalAmount / (1 + rate), tax = o.totalAmount - taxable;
+    const buyer = ((o.shippingAddress || {}).state || '').trim().toLowerCase();
+    const intra = P.state && buyer === P.state.trim().toLowerCase();
+    return { o, taxable, tax, intra, cgst: intra ? tax / 2 : 0, sgst: intra ? tax / 2 : 0, igst: intra ? 0 : tax };
   });
-  const cgst = rows.reduce((a, r) => a + r.g.cgst, 0);
-  const sgst = rows.reduce((a, r) => a + r.g.sgst, 0);
-  const igst = rows.reduce((a, r) => a + r.g.igst, 0);
-  const taxable = rows.reduce((a, r) => a + r.g.taxable, 0);
-  const invNo = i => 'AJ/26-27/' + String(1041 + i).padStart(4, '0');
+  const sum = k => rows.reduce((a, r) => a + r[k], 0);
   el.innerHTML = `
+  <div class="adm-alert warn"><span>🧾</span><div><b>This is an estimate, not your tax return.</b> Prices are treated as tax-inclusive. Confirm the GST rate and HSN code with your accountant before filing. Based on your latest ${orders.length} paid orders.</div></div>
   <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(165px,1fr))">
-    ${kpi('GST rate', (G.rate * 100).toFixed(1) + '%', G.inclusive ? 'tax-inclusive pricing' : 'tax-exclusive pricing')}
-    ${kpi('Taxable value', money(taxable), 'on ' + orders.length + ' invoices')}
-    ${kpi('CGST + SGST', money(cgst + sgst), 'intra-state supply')}
-    ${kpi('IGST', money(igst), 'inter-state supply')}
-    ${kpi('Credit notes', '1', 'against returns')}
+    ${kpi('GST rate used', (rate * 100).toFixed(1) + '%', 'edit below')}
+    ${kpi('Taxable value', money(sum('taxable')), 'on ' + orders.length + ' invoices')}
+    ${kpi('CGST + SGST', money(sum('cgst') + sum('sgst')), P.state ? 'same-state buyers' : 'set your state below')}
+    ${kpi('IGST', money(sum('igst')), 'other-state buyers')}
   </div>
-  <div class="adm-alert"><span>🧾</span><div><b>Jewellery HSN 7117</b> — imitation jewellery attracts 3% GST. Rate changes here flow into every invoice, order summary and the admin dashboard instantly; nothing is hard-coded in the templates.</div></div>
-  <div class="adm-grid-2">
-    <div class="adm-card"><h3>Tax configuration</h3>
-      <div class="f-grid">
-        ${fld('gLegal', 'Legal entity', STORE.legalName, 'text', true)}
-        ${fld('gGstin', 'GSTIN', STORE.gstin)}
-        ${fld('gPan', 'PAN', STORE.pan)}
-        ${fld('gHsn', 'Default HSN code', G.hsnDefault)}
-        ${fld('gRate', 'GST rate (%)', (G.rate * 100).toFixed(1))}
-        <div class="field"><label>Pricing mode</label><select id="gMode"><option value="1" ${G.inclusive ? 'selected' : ''}>Tax-inclusive (MRP includes GST)</option><option value="0" ${!G.inclusive ? 'selected' : ''}>Tax-exclusive (added at checkout)</option></select></div>
-        <div class="field"><label>Origin state</label><input value="${esc(STORE.sellerState)}" readonly style="background:var(--linen)"></div>
-        <div class="field"><label>Round-off</label><select id="gRound"><option value="1" ${G.roundOff ? 'selected' : ''}>Round to nearest rupee</option><option value="0" ${!G.roundOff ? 'selected' : ''}>Keep paise</option></select></div>
-      </div>
-      <button class="adm-btn dark" id="gSave">Save GST settings</button>
-      <p class="adm-note">Configuration is CA-owned: intra-state splits to CGST+SGST, inter-state to IGST, based on the buyer's shipping state.</p>
-    </div>
-    <div class="adm-card"><h3>HSN summary</h3>
-      ${tbl(['HSN', 'Description', 'Rate', 'Taxable', 'Tax'], [
-        tr(['7117', 'Imitation jewellery of base metal', '3%', money(taxable), money(cgst + sgst + igst)]),
-        tr(['7113', 'Articles of precious metal (bridal)', '3%', money(0), money(0)]),
-        tr(['9983', 'Gift card / service', '18%', money(0), money(0)])
-      ])}
-      <h3 style="font-size:13px;margin:18px 0 10px">Tax split</h3>
-      ${tbl(['Head', 'Amount'], [
-        tr(['CGST @ ' + (G.rate * 50).toFixed(2) + '%', money(cgst)]),
-        tr(['SGST @ ' + (G.rate * 50).toFixed(2) + '%', money(sgst)]),
-        tr(['IGST @ ' + (G.rate * 100).toFixed(2) + '%', money(igst)]),
-        tr(['<b>Total tax</b>', '<b>' + money(cgst + sgst + igst) + '</b>'])
-      ])}
-    </div>
+  <div class="adm-card" style="margin-bottom:14px"><h3>Estimate settings</h3>
+    <div class="f-grid">${fld('gRate', 'GST rate (%)', P.rate, 'number', false, 'min="0" step="0.1"')}${fld('gState', 'Your business state (for CGST/SGST vs IGST)', P.state, 'text')}</div>
+    <button class="adm-btn dark" id="gSave">Apply</button>
+    <p class="adm-note">Saved in this browser only. The invoice PDF itself is generated by the backend.</p>
   </div>
-  <div class="adm-card" style="margin-top:14px"><h3>Invoice register</h3>
-    ${rows.length ? tbl(['Invoice no.', 'Order', 'Date', 'Buyer', 'State', 'Taxable', 'CGST', 'SGST', 'IGST', 'Total', ''], rows.map((r, i) => tr([
-      '<span class="adm-url">' + invNo(i) + '</span>', r.o.id, dshort(r.o.date),
-      esc((r.o.customer && r.o.customer.name) || '—'), esc(r.buyerState),
-      money(r.g.taxable), money(r.g.cgst), money(r.g.sgst), money(r.g.igst), money(r.o.sub),
-      '<button class="adm-btn" data-inv="' + r.o.id + '">Open</button>'
-    ]))) : '<p class="adm-note">No invoices yet — they are generated automatically the moment an order is placed.</p>'}
-    <p class="adm-note">Invoice numbers follow the series agreed with your CA and reset each financial year. PDFs are e-mailed on dispatch.</p>
+  <div class="adm-card"><h3>Invoice register</h3>
+    ${rows.length ? tbl(['Order', 'Date', 'Buyer', 'State', 'Taxable', 'CGST', 'SGST', 'IGST', 'Total', ''], rows.map(r => tr([
+      esc(r.o.orderNumber || r.o.id), dshort(r.o.createdAt), esc(customerOf(r.o)), esc((r.o.shippingAddress || {}).state || '—'),
+      money(r.taxable), money(r.cgst), money(r.sgst), money(r.igst), money(r.o.totalAmount),
+      `<button class="adm-btn" data-inv="${esc(r.o.id)}">Invoice PDF</button>`]))) : '<p class="adm-note">No paid orders yet.</p>'}
   </div>`;
   el.querySelector('#gSave').addEventListener('click', () => {
-    saveSettings({ gst: {
-      rate: (+gv(el, 'gRate') / 100) || 0.03, inclusive: el.querySelector('#gMode').value === '1',
-      hsnDefault: gv(el, 'gHsn'), roundOff: el.querySelector('#gRound').value === '1'
-    } });
-    audit('GST settings updated (rate ' + gv(el, 'gRate') + '%)');
-    toast('GST settings saved — invoices recalculated');
+    try { localStorage.setItem('amour_gst_prefs_v1', JSON.stringify({ rate: num(gv(el, 'gRate')), state: gv(el, 'gState') })); } catch (e) {}
     renderGST(el);
   });
-  el.querySelectorAll('[data-inv]').forEach(b => b.addEventListener('click', () => window.open('invoice.html?order=' + b.dataset.inv, '_blank')));
+  el.querySelectorAll('[data-inv]').forEach(b => b.addEventListener('click', () => openBlob('/api/orders/' + encodeURIComponent(b.dataset.inv) + '/invoice')));
 }
+
 /* ============================================================
-   SETTINGS & SECURITY — roles, checklist, audit log, backups
+   EMAIL QUEUE (outgoing e-mails the backend is sending or retrying)
    ============================================================ */
-const SECURITY_CHECKS = [
-  ['SSL / HTTPS', 'TLS 1.3, HSTS enabled, auto-renewing certificate', true],
-  ['Payment gateway', 'PCI-DSS Level 1 gateway · tokenised cards', true],
-  ['Card data on our server', 'Never stored, never logged — tokens only', true],
-  ['OTP authentication', 'Customer login and order verification', true],
-  ['Admin 2FA', 'Every admin account, enforced at sign-in', true],
-  ['Role-based access', 'Owner · Operations · Accountant · Marketing scopes', true],
-  ['Automated backups', 'Daily 03:00 IST, 30-day retention, off-site', true],
-  ['Firewall & monitoring', 'WAF, rate limiting, uptime + anomaly alerts', true],
-  ['CAPTCHA / anti-bot', 'Sign-in, newsletter and checkout forms', true],
-  ['Secure API architecture', 'Signed requests, scoped keys, no client secrets', true],
-  ['Rate limiting', 'Login lockout after 5 attempts · 5-minute cooling', true],
-  ['Access log', 'Every admin action timestamped with the staff user', true]
-];
-const CREDS_KEY = 'amour_admin_creds_v2';
-
-function staffCreds() {
-  let c = {};
-  try { c = JSON.parse(localStorage.getItem(CREDS_KEY)) || {}; } catch (e) { c = {}; }
-  return { user: c.user || AUTH.user, pass: c.pass || AUTH.pass };
-}
-
-function settingsRolesCard(roles) {
-  return `<div class="adm-card"><h3>Roles &amp; access</h3>
-    ${tbl(['User', 'Role', 'Scope', '2FA', ''], roles.map((r, i) => tr([
-      esc(r.user), chip(r.role, 'info'), '<span class="pill">' + esc(r.scope) + '</span>',
-      r.twofa ? chip('On', 'ok') : chip('Off', 'bad'),
-      `<button class="adm-btn" data-role="${i}">Manage</button>`
-    ])))}
-    <p class="adm-note">Least-privilege by default: the accountant never sees customer PII, marketing never sees GST or customer data.</p>
-    <h3 style="font-size:13px;margin:18px 0 10px">Staff sign-in credentials</h3>
-    <div class="f-grid">
-      ${fld('secUser', 'Username', staffCreds().user)}
-      ${fld('secPass', 'New password (blank = keep current)', '', 'password')}
-    </div>
-    <button class="adm-btn dark" id="secSave">Update credentials</button>
-    <p class="adm-note">Production stores a salted hash server-side — credentials are never kept in the browser.</p>
-  </div>`;
-}
-function settingsBackupCard(S) {
-  return `<div class="adm-card"><h3>Data &amp; backups</h3>
-    <div class="adm-row-actions">
-      <button class="adm-btn dark" id="expAll">Export all data (JSON)</button>
-      <button class="adm-btn" id="impAll">Import backup</button>
-      <button class="adm-btn" id="resetDemo">Reset demo data</button>
-      <button class="adm-btn" id="wipeAll">Erase store data</button>
-    </div>
-    <p class="adm-note">The export covers catalogue overrides, orders, coupons, gift cards, returns, content, settings and the audit log — everything this console owns.</p>
-    <table class="adm-kv"><tbody>
-      <tr><td>Backup frequency</td><td>Daily</td></tr>
-      <tr><td>Retention</td><td>${esc(S.retention)}</td></tr>
-      <tr><td>Restore test</td><td>Monthly</td></tr>
-      <tr><td>Encryption</td><td>At rest + in transit</td></tr>
-    </tbody></table>
-  </div>`;
-}
-function renderSettings(el) {
-  const S = getSettings();
-  const roles = S.roles || [
-    { role: 'Owner',      user: 'amour',      scope: 'Full access — catalogue, orders, costs, settings, staff', twofa: true },
-    { role: 'Operations', user: 'ops_meera',   scope: 'Orders, inventory, returns, shipping — no costs or settings', twofa: true },
-    { role: 'Accountant', user: 'accounts_amour', scope: 'GST, invoices, refunds — no customer PII, no catalogue', twofa: true },
-    { role: 'Marketing',  user: 'mkt_nikita',  scope: 'Coupons, discounts, WhatsApp journeys, campaigns — no GST or customer data', twofa: true }
-  ];
+async function renderEmails(el) {
+  const f = el.dataset.f || 'FAILED';
+  loading(el);
+  let data;
+  try { data = await api('/api/admin/emails?status=' + f + '&size=50'); }
+  catch (e) {
+    if (e.status === 404 || e.status === 405) { el.innerHTML = '<div class="adm-alert"><span>ℹ️</span><div>The e-mail queue is not switched on in this backend version yet.</div></div>'; return; }
+    if (e.status !== 401) failBox(el, e, () => renderEmails(el)); return;
+  }
+  const items = pageItems(data);
   el.innerHTML = `
-  <div class="adm-alert">Security &amp; access — the checklist from the build brief, verified. Credentials, 2FA and the full audit trail are enforced on this console.</div>
-  <div class="adm-grid2">
-    ${settingsRolesCard(roles)}
-    <div class="adm-card"><h3>Security checklist</h3>
-      ${tbl(['Control', 'How it is met', 'Status'], SECURITY_CHECKS.map(c => tr(['<b>' + c[0] + '</b>', '<span class="pill">' + esc(c[1]) + '</span>', chip(c[2] ? 'Pass' : 'Gap', c[2] ? 'ok' : 'bad')])))}
-    </div>
+  <div class="adm-alert"><span>✉️</span><div>Every e-mail the shop sends (order updates, welcome, sign-in alerts) waits in a queue and is sent in the background. If the e-mail provider is down it retries automatically — 6 attempts over about 9 hours. <b>Failed</b> ones can be retried here.</div></div>
+  <div class="adm-toolbar">
+    <select id="emF">${[['FAILED', 'Failed'], ['PENDING', 'Waiting / retrying'], ['SENT', 'Sent (last 14 days)']].map(([v, t]) => `<option value="${v}" ${f === v ? 'selected' : ''}>${t}</option>`).join('')}</select>
+    <span class="pill">${items.length} shown</span>
   </div>
-  <div class="adm-grid2">
-    <div class="adm-card"><h3>Audit log</h3>
-      ${(() => { const log = readList(AUDIT_KEY).slice(0, 12);
-        return log.length ? tbl(['When', 'User', 'Action'], log.map(e => tr([new Date(e.at).toLocaleString('en-IN'), chip(esc(e.user), 'info'), esc(e.action)])))
-        : '<p class="adm-note">No actions recorded yet in this browser — make a change anywhere in the console and it will appear here.</p>'; })()}
-    </div>
-    ${settingsBackupCard(S)}
-  </div>`;
-
-  el.querySelector('#secSave').addEventListener('click', () => {
-    const u = gv(el, 'secUser'), p = gv(el, 'secPass');
-    if (!u) return toast('Username cannot be empty');
-    const c = staffCreds(); saveCreds({ user: u, pass: p || c.pass });
-    audit('Staff credentials updated for ' + u);
-    toast('Credentials updated — use them at the next sign-in');
-    renderSettings(el);
-  });
-  el.querySelectorAll('[data-role]').forEach(b => b.addEventListener('click', () => {
-    const r = roles[+b.dataset.role];
-    toast(r.user + ' · ' + r.role + ' — 2FA ' + (r.twofa ? 'enforced' : 'off') + '. Production: manage from the staff directory.');
+  ${items.length ? tbl(['To', 'Subject', 'Attempts', 'Created', 'Last problem', 'Status', 'Actions'], items.map(m => tr([
+    esc(m.to), esc(m.subject), m.attempts, dtime(m.createdAt), '<span style="display:block;max-width:260px">' + esc(m.lastError || '—') + '</span>',
+    chip(m.status, m.status === 'SENT' ? 'ok' : m.status === 'FAILED' ? 'bad' : 'warn'),
+    m.status === 'FAILED' ? `<button class="adm-btn dark" data-retry="${esc(m.id)}">Retry</button>` : '—']))) : '<p class="adm-note">Nothing here.</p>'}`;
+  el.querySelector('#emF').addEventListener('change', e => { el.dataset.f = e.target.value; renderEmails(el); });
+  el.querySelectorAll('[data-retry]').forEach(b => b.addEventListener('click', async () => {
+    const done = await act(b, () => api('/api/admin/emails/' + encodeURIComponent(b.dataset.retry) + '/retry', { method: 'POST' }), 'Queued for another attempt');
+    if (done) renderEmails(el);
   }));
-  el.querySelector('#expAll').addEventListener('click', () => {
-    const dump = { content: getContent(), overrides: getOverrides(), orders: getOrders(), coupons: readList(COUPONS_KEY),
-      giftCards: getGiftCards(), returns: getReturns(), carts: getCarts(), alerts: getAlerts(), broadcasts: getBroadcasts(),
-      settings: getSettings(), audit: readList(AUDIT_KEY), exportedAt: new Date().toISOString() };
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([JSON.stringify(dump, null, 2)], { type: 'application/json' }));
-    a.download = 'amour-admin-backup-' + new Date().toISOString().slice(0, 10) + '.json';
-    a.click(); URL.revokeObjectURL(a.href);
-    audit('Data export downloaded'); toast('Backup exported — ' + a.download);
-  });
-  el.querySelector('#impAll').addEventListener('click', () => {
-    const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.json';
-    inp.onchange = () => { const f = inp.files[0]; if (!f) return;
-      const rd = new FileReader();
-      rd.onload = () => { try { const d = JSON.parse(rd.result);
-          if (d.content) saveContent(d.content); if (d.overrides) saveOverrides(d.overrides);
-          if (d.orders) saveOrders(d.orders); if (d.settings) saveSettings(d.settings);
-          audit('Backup imported: ' + f.name); toast('Backup restored — re-rendering'); renderSettings(el);
-        } catch (e) { toast('Invalid backup file'); } };
-      rd.readAsText(f); };
-    inp.click();
-  });
-  el.querySelector('#resetDemo').addEventListener('click', () => {
-    if (!confirm('Reset demo data? Catalogue overrides, content and settings return to their seeded values.')) return;
-    [CONTENT_KEY, 'amour_product_overrides_v1'].forEach(k => localStorage.removeItem(k));
-    audit('Demo data reset'); toast('Demo data reset'); renderSettings(el);
-  });
-  el.querySelector('#wipeAll').addEventListener('click', () => {
-    if (!confirm('Erase ALL store data in this browser? This cannot be undone — export a backup first.')) return;
-    Object.keys(localStorage).filter(k => k.indexOf('amour_') === 0).forEach(k => localStorage.removeItem(k));
-    toast('All store data erased — reloading'); setTimeout(() => location.reload(), 800);
-  });
 }
 
 /* ============================================================
    SECTION ROUTER
    ============================================================ */
 const SEC_TITLES = {
-  dash: 'Dashboard', orders: 'Orders', products: 'Products', categories: 'Categories',
-  inventory: 'Inventory', customers: 'Customers', reviews: 'Reviews', returns: 'Returns & RTO',
-  coupons: 'Coupons & Gift Cards', discounts: 'Automatic Discounts', marketing: 'Marketing & Tracking',
-  whatsapp: 'WhatsApp Journeys',
-  abandoned: 'Abandoned Carts', messages: 'Customer Messages', shipping: 'Shipping',
-  gst: 'GST & Invoicing', settings: 'Settings & Backup'
+  dash: 'Dashboard', orders: 'Orders', products: 'Products', categories: 'Categories', inventory: 'Inventory',
+  customers: 'Customers', reviews: 'Reviews', returns: 'Returns & Refunds', coupons: 'Coupons',
+  messages: 'Customer Messages', shipping: 'Shipping', gst: 'GST & Invoicing', emails: 'Email Queue'
 };
 const RENDERERS = {
-  dash: renderDash, orders: renderOrders, products: renderProducts, categories: renderCategories,
-  inventory: renderInventory, customers: renderCustomers, reviews: renderReviews, returns: renderReturns,
-  coupons: renderCoupons, discounts: renderDiscounts, marketing: renderMarketing, whatsapp: renderWhatsApp,
-  abandoned: renderAbandoned,
-  messages: renderMessages, shipping: renderShipping, gst: renderGST, settings: renderSettings
+  dash: renderDash, orders: renderOrders, products: renderProducts, categories: renderCategories, inventory: renderInventory,
+  customers: renderCustomers, reviews: renderReviews, returns: renderReturns, coupons: renderCoupons,
+  messages: renderMessages, shipping: renderShipping, gst: renderGST, emails: renderEmails
 };
-
 function renderSection(key) {
   const sec = document.querySelector('.adm-sec[data-sec="' + key + '"]');
   if (!sec || !RENDERERS[key]) return;
@@ -1951,92 +1099,73 @@ function renderSection(key) {
 }
 
 /* ============================================================
-   LOGIN GATE — amour / amour12423 + OTP two-factor + lockout
+   SIGN-IN  (real backend login: e-mail + password, 5 wrong tries lock the account)
    ============================================================ */
-const LOCK_KEY = 'amour_admin_lock_v1';
-function saveCreds(c) { localStorage.setItem(CREDS_KEY, JSON.stringify(c)); }
-function failState() {
-  try { return JSON.parse(localStorage.getItem(FAILS_KEY)) || { fails: 0, until: 0 }; } catch (e) { return { fails: 0, until: 0 }; }
+let expiryTimer = null;
+function tokenExpiry(token) {
+  try { return JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).exp * 1000; } catch (e) { return 0; }
 }
-function setFailState(s) { localStorage.setItem(FAILS_KEY, JSON.stringify(s)); }
-function loginLocked() {
-  const s = failState();
-  return s.until > Date.now() ? Math.ceil((s.until - Date.now()) / 60000) : 0;
+function showLoginError(msg) {
+  const err = document.getElementById('admErr');
+  err.textContent = msg || '';
+  err.style.display = msg ? 'block' : 'none';
+  err.classList.toggle('show', !!msg);
 }
-
+function signOut(message) {
+  clearTimeout(expiryTimer);
+  session.clear();
+  cache.orders = cache.products = null;
+  document.getElementById('admShell').hidden = true;
+  document.getElementById('admLogin').hidden = false;
+  document.getElementById('admPass').value = '';
+  document.querySelectorAll('.adm-sec').forEach(s => { s.innerHTML = ''; s.removeAttribute('data-ready'); delete s.dataset.q; delete s.dataset.f; delete s.dataset.page; });
+  showLoginError(message || '');
+}
+let loginBound = false;
 function initLogin() {
-  const user = document.getElementById('admUser'), pass = document.getElementById('admPass');
-  const err = document.getElementById('admErr'), btn = document.getElementById('admLoginBtn');
-  const step1 = document.getElementById('admStep1'), step2 = document.getElementById('admStep2');
-  const otp = document.getElementById('admOtp'), otpBtn = document.getElementById('admOtpBtn');
-  const otpInfo = document.getElementById('admOtpInfo');
-  let pendingUser = null, pendingCode = null;
-
-  document.getElementById('admPassEye').addEventListener('click', () => {
-    pass.type = pass.type === 'password' ? 'text' : 'password';
-  });
-  const back = () => { step2.hidden = true; step1.hidden = false; otp.value = ''; err.textContent = ''; };
-  document.getElementById('admBack').addEventListener('click', back);
-
-  btn.addEventListener('click', () => {
-    const lock = loginLocked();
-    if (lock) { err.textContent = 'Console locked after repeated failures — try again in ' + lock + ' min.'; return; }
-    const c = staffCreds();
-    if ((user.value || '').trim() !== c.user || pass.value !== c.pass) {
-      const s = failState(); s.fails++;
-      if (s.fails >= AUTH.maxFails) { s.until = Date.now() + AUTH.lockMins * 60000; s.fails = 0; }
-      setFailState(s);
-      err.textContent = (s.until > Date.now())
-        ? 'Too many attempts — the console is locked for ' + AUTH.lockMins + ' minutes.'
-        : 'Wrong password — please try again. ' + (AUTH.maxFails - s.fails) + ' attempt' + (AUTH.maxFails - s.fails === 1 ? '' : 's') + ' remaining before lockout.';
-      audit('Failed sign-in attempt: ' + (user.value || '(blank)'));
-      return;
-    }
-    setFailState({ fails: 0, until: 0 });
-    err.textContent = '';
-    pendingUser = c.user;
-    pendingCode = String(Math.floor(100000 + Math.random() * 900000));
-    otpInfo.innerHTML = 'Demo 2FA — this sign-in code is <b>' + pendingCode + '</b>. Production: TOTP authenticator app or SMS OTP.';
-    step1.hidden = true; step2.hidden = false; otp.focus();
-  });
-  pass.addEventListener('keydown', e => { if (e.key === 'Enter') btn.click(); });
-
-  otpBtn.addEventListener('click', () => {
-    if ((otp.value || '').trim() !== pendingCode) {
-      err.textContent = 'That two-factor code does not match. Check the code and try again.';
-      return;
-    }
-    err.textContent = '';
-    sessionStorage.setItem(ADM_KEY, pendingUser);
-    audit('Signed in');
-    openPanel(pendingUser);
-  });
-  otp.addEventListener('keydown', e => { if (e.key === 'Enter') otpBtn.click(); });
+  if (loginBound) return;
+  loginBound = true;
+  const user = document.getElementById('admUser'), pass = document.getElementById('admPass'), btn = document.getElementById('admLoginBtn');
+  document.getElementById('admPassEye').addEventListener('click', () => { pass.type = pass.type === 'password' ? 'text' : 'password'; });
+  const submit = async () => {
+    const email = (user.value || '').trim(), password = pass.value;
+    if (!email || !password) { showLoginError('Enter your e-mail and password.'); return; }
+    btn.disabled = true; btn.textContent = 'Signing in…'; showLoginError('');
+    try {
+      const r = await api('/api/admin/auth/login', { method: 'POST', body: { email, password }, noAuthRedirect: true });
+      if (!r || !r.token) throw new ApiError('Sign-in failed. Please try again.', 0);
+      session.save(r.token, { email: r.email, name: r.name, roles: r.roles || [] });
+      openPanel();
+    } catch (e) {
+      showLoginError(e.status === 401 || e.status === 400 ? 'Wrong e-mail or password.' : e.message);
+    } finally { btn.disabled = false; btn.textContent = 'Sign In'; }
+  };
+  btn.addEventListener('click', submit);
+  [user, pass].forEach(i => i.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); }));
 }
-
-function openPanel(user) {
+let panelBound = false;
+function openPanel() {
+  const p = session.profile;
   document.getElementById('admLogin').hidden = true;
-  const shell = document.getElementById('admShell');
-  shell.hidden = false;
-  document.getElementById('admWho').textContent = user + ' · Owner';
-  document.getElementById('admAva').textContent = (user[0] || 'A').toUpperCase();
+  document.getElementById('admShell').hidden = false;
+  const roles = (p.roles || []).join(' ');
+  document.getElementById('admWho').textContent = (p.name || p.email || 'Admin') + (roles.indexOf('SUPER_ADMIN') > -1 ? ' · Super admin' : ' · Admin');
+  document.getElementById('admAva').textContent = ((p.name || p.email || 'A')[0] || 'A').toUpperCase();
   document.getElementById('admSession').textContent = 'Signed in ' + new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
-  document.querySelectorAll('#admNav button').forEach(b => b.addEventListener('click', () => renderSection(b.dataset.sec)));
-  document.getElementById('admLogout').addEventListener('click', () => {
-    audit('Signed out');
-    sessionStorage.removeItem(ADM_KEY);
-    shell.hidden = true;
-    document.getElementById('admLogin').hidden = false;
-    document.getElementById('admPass').value = '';
-    document.getElementById('admStep2').hidden = true;
-    document.getElementById('admStep1').hidden = false;
-    document.getElementById('admErr').textContent = '';
-  });
+  if (!panelBound) {
+    panelBound = true;
+    document.querySelectorAll('#admNav button').forEach(b => b.addEventListener('click', () => renderSection(b.dataset.sec)));
+    document.getElementById('admLogout').addEventListener('click', () => signOut(''));
+  }
+  const exp = tokenExpiry(session.token);
+  clearTimeout(expiryTimer);
+  if (exp) expiryTimer = setTimeout(() => signOut('Your session has ended — please sign in again.'), Math.max(1000, exp - Date.now()));
   renderSection('dash');
 }
 
-/* ---------- boot ---------- */
 document.addEventListener('DOMContentLoaded', () => {
-  const existing = sessionStorage.getItem(ADM_KEY);
-  if (existing) { openPanel(existing); } else { initLogin(); }
+  initLogin();
+  const t = session.token;
+  if (t && (!tokenExpiry(t) || tokenExpiry(t) > Date.now())) openPanel();
+  else if (t) { session.clear(); showLoginError('Your session has ended — please sign in again.'); }
 });
